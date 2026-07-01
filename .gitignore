@@ -2,6 +2,7 @@
 benchmark/data/
 evaluate_langchain/
 logs/
+Xview2_Strong_Baseline-master/
 
 # Environment variables and secrets
 .env

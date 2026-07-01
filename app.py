@@ -403,7 +403,12 @@ def extract_final_answer(text: str) -> str:
         return ""
     m = ANSWER_RE.search(text)
     if m:
-        return m.group(1).strip()
+        before = text[: m.start()].strip()
+        answer = m.group(1).strip()
+        after = text[m.end() :].strip()
+        if len(before) + len(after) > 80:
+            return "\n\n".join(part for part in (before, answer, after) if part)
+        return answer
     return text.strip()
 
 
@@ -460,6 +465,59 @@ def _tool_trace(response: dict) -> list[dict[str, Any]]:
             trace.append(entry)
             pending = None
     return trace
+
+
+def _extract_damage_overlay_paths(response: dict, *texts: str) -> list[str]:
+    """Find generated damage overlay images in tool outputs / answer text."""
+    found: list[str] = []
+
+    def _add_path(value: str) -> None:
+        value = value.strip().strip("`'\" ,.;")
+        if not value.endswith("damage_overlay.png"):
+            return
+        path = Path(value)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        if path.exists() and str(path) not in found:
+            found.append(str(path))
+
+    def _visit(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key == "overlay_path" and isinstance(value, str):
+                    _add_path(value)
+                else:
+                    _visit(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                _visit(item)
+        elif isinstance(obj, str):
+            for match in re.findall(r"[\w./~:-]*damage_overlay\.png", obj):
+                _add_path(match)
+
+    for msg in response.get("messages", []):
+        if isinstance(msg, ToolMessage):
+            content = msg.content
+            if isinstance(content, str):
+                try:
+                    _visit(json.loads(content))
+                except Exception:
+                    _visit(content)
+            else:
+                _visit(content)
+
+    for text in texts:
+        if text:
+            _visit(text)
+
+    return found
+
+
+def _render_chat_message(message: dict[str, Any]) -> None:
+    st.markdown(message["content"])
+    for image_path in message.get("images", []) or []:
+        if Path(image_path).exists():
+            st.image(image_path, caption=Path(image_path).name, width=420)
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +852,7 @@ with tabs[0]:
             raw_answer = _last_ai_message(response)
             final_answer = extract_final_answer(raw_answer)
             trace = _tool_trace(response)
+            images = _extract_damage_overlay_paths(response, raw_answer, final_answer)
 
             status.update(
                 label=f"Done in {elapsed:.1f}s · {len(trace)} tool call(s)",
@@ -801,14 +860,21 @@ with tabs[0]:
             )
 
             placeholder.markdown(final_answer or "_(empty response)_")
+            for image_path in images:
+                st.image(image_path, caption=Path(image_path).name, width=420)
 
             st.session_state.messages.append(
-                {"role": "assistant", "content": final_answer or raw_answer}
+                {
+                    "role": "assistant",
+                    "content": final_answer or raw_answer,
+                    "images": images,
+                }
             )
             st.session_state.last_answer_meta = {
                 "elapsed": elapsed,
                 "tool_calls": len(trace),
                 "raw_answer": raw_answer,
+                "images": images,
             }
 
         if show_tool_trace:
@@ -818,10 +884,12 @@ with tabs[0]:
                     st.json(step.get("args") or {})
                     st.code(step.get("result") or "", language="text")
 
-    # Render previous messages on rerun
-    for m in st.session_state.messages:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+    # Render previous messages on rerun. During a fresh submit, the current
+    # user/assistant turns have already been rendered above.
+    if not user_text:
+        for m in st.session_state.messages:
+            with st.chat_message(m["role"]):
+                _render_chat_message(m)
 
     if st.session_state.last_answer_meta and not user_text:
         meta = st.session_state.last_answer_meta
