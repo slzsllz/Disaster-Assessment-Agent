@@ -1,0 +1,20 @@
+{
+  "building_total": 183846,
+  "no_damage": 176850,
+  "minor_damage": 5671,
+  "major_damage": 450,
+  "destroyed": 875,
+  "damaged": 6996,
+  "damage_ratio": 0.03805358832936262,
+  "damage_level": "minor",
+  "building_mask_path": "/home5/pbz/Disaster-Assessment-Agent/tmp/streamlit_out/dd6db17a9e9e/out/damage_assessment/building_mask.png",
+  "damage_mask_path": "/home5/pbz/Disaster-Assessment-Agent/tmp/streamlit_out/dd6db17a9e9e/out/damage_assessment/damage_mask.png",
+  "overlay_path": "/home5/pbz/Disaster-Assessment-Agent/tmp/streamlit_out/dd6db17a9e9e/out/damage_assessment/damage_overlay.png",
+  "class_meaning": {
+    "0": "background",
+    "1": "building/no-damage",
+    "2": "minor-damage",
+    "3": "major-damage",
+    "4": "destroyed"
+  }
+}
