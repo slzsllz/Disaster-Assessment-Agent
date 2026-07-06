@@ -3,6 +3,7 @@ benchmark/data/
 evaluate_langchain/
 logs/
 Xview2_Strong_Baseline-master/
+sen1floods11-segmentation-main/
 
 # Environment variables and secrets
 .env

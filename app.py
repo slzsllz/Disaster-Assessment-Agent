@@ -468,12 +468,13 @@ def _tool_trace(response: dict) -> list[dict[str, Any]]:
 
 
 def _extract_damage_overlay_paths(response: dict, *texts: str) -> list[str]:
-    """Find generated damage overlay images in tool outputs / answer text."""
+    """Find generated overlay images in tool outputs / answer text."""
     found: list[str] = []
+    overlay_names = ("damage_overlay.png", "flood_overlay.png")
 
     def _add_path(value: str) -> None:
         value = value.strip().strip("`'\" ,.;")
-        if not value.endswith("damage_overlay.png"):
+        if not value.endswith(overlay_names):
             return
         path = Path(value)
         if not path.is_absolute():
@@ -492,7 +493,7 @@ def _extract_damage_overlay_paths(response: dict, *texts: str) -> list[str]:
             for item in obj:
                 _visit(item)
         elif isinstance(obj, str):
-            for match in re.findall(r"[\w./~:-]*damage_overlay\.png", obj):
+            for match in re.findall(r"[\w./~:-]*(?:damage|flood)_overlay\.png", obj):
                 _add_path(match)
 
     for msg in response.get("messages", []):
