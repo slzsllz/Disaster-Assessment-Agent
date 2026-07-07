@@ -2,6 +2,7 @@
 benchmark/data/
 evaluate_langchain/
 logs/
+tmp/streamlit_out/
 Xview2_Strong_Baseline-master/
 sen1floods11-segmentation-main/
 
@@ -15,6 +16,7 @@ sen1floods11-segmentation-main/
 # Configuration files with API keys (templates are OK)
 agent/config_*.json
 !agent/config_*.json.example
+agent/error_memory.json
 training_free_grpo/configs/*_config.json
 !training_free_grpo/configs/*_config.json.example
 

@@ -1,5 +1,5 @@
 """
-Earth Agent – Streamlit interaction UI.
+Disaster Detection Agent – Streamlit interaction UI.
 
 Features
 --------
@@ -15,6 +15,8 @@ Features
 from __future__ import annotations
 
 import asyncio
+import base64
+import html
 import json
 import os
 import re
@@ -86,6 +88,7 @@ from langchain_core.messages import (  # noqa: E402
     SystemMessage,
     ToolMessage,
 )
+from agent.error_memory import ErrorMemory  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -99,6 +102,8 @@ QUESTION_FILE = BENCHMARK_DIR / "question.json"
 BENCHMARK_DATA_DIR = BENCHMARK_DIR / "data"
 TEMP_BASE = PROJECT_ROOT / "tmp" / "streamlit_out"
 TEMP_BASE.mkdir(parents=True, exist_ok=True)
+ERROR_MEMORY = ErrorMemory(AGENT_DIR / "error_memory.json")
+WATERMARK_LOGO = PROJECT_ROOT / "imgs" / "深圳大学-logo-1024px.png"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -138,7 +143,7 @@ def build_system_prompt(base: str, data_roots: list[str]) -> str:
         "the data the user is referring to:\n"
         + "\n".join(f"  - {r}" for r in data_roots)
     )
-    return base + roots_block
+    return base + roots_block + ERROR_MEMORY.format_prompt_block()
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +177,7 @@ def list_model_configs() -> list[dict[str, Any]]:
             def _sub(s: str) -> str:
                 return re.sub(
                     r"\$\{([^}]+)\}",
-                    lambda m: os.getenv(m.group(1), m.group(0)),
+                    lambda m: os.getenv(m.group(1), ""),
                     s,
                 )
 
@@ -207,6 +212,9 @@ def _try_fill_credentials(name: str, model: dict[str, Any]) -> None:
         # "gpt-5": "OPENAI",
         # "gpt-4": "OPENAI",
         "deepseek": "DEEPSEEK",
+        "qwen": "QWEN",
+        "qwen3": "QWEN",
+        "qwen3-32b": "QWEN",
         # "kimi": "KIMI",
         # "kimi_k2": "KIMI",
         # "gemini": "GEMINI",
@@ -396,6 +404,18 @@ def _build_agent(
 # Helpers – agent execution + answer extraction
 # ---------------------------------------------------------------------------
 ANSWER_RE = re.compile(r"<Answer>(.*?)</Answer>", re.DOTALL | re.IGNORECASE)
+LOCAL_PATH_RE = re.compile(
+    r"`?(/(?:home\d*|tmp)/[^\s`*),;]+(?:\.[A-Za-z0-9]+))`?"
+)
+IMAGE_SUFFIXES = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".tif",
+    ".tiff",
+    ".bmp",
+    ".webp",
+}
 
 
 def extract_final_answer(text: str) -> str:
@@ -514,8 +534,71 @@ def _extract_damage_overlay_paths(response: dict, *texts: str) -> list[str]:
     return found
 
 
+def _is_image_file(path: str) -> bool:
+    return Path(path).suffix.lower() in IMAGE_SUFFIXES
+
+
+def _sanitize_local_paths_for_display(text: str) -> str:
+    """Hide machine-local paths from the chat transcript."""
+    if not text:
+        return ""
+
+    def _replace(match: re.Match[str]) -> str:
+        path = match.group(1)
+        return f"`{Path(path).name}`"
+
+    return LOCAL_PATH_RE.sub(_replace, text)
+
+
+def _render_attachments(attachments: list[dict[str, str]]) -> None:
+    if not attachments:
+        return
+
+    image_items = [a for a in attachments if a.get("type") == "image"]
+    file_items = [a for a in attachments if a.get("type") != "image"]
+
+    if image_items:
+        visible = image_items[:4]
+        cols = st.columns([1] * len(visible) + [max(1, 4 - len(visible))], gap="small")
+        for idx, item in enumerate(visible):
+            path = item.get("path", "")
+            name = item.get("name") or Path(path).name or "image"
+            safe_name = html.escape(name)
+            with cols[idx]:
+                if path and Path(path).exists():
+                    try:
+                        st.image(path, caption=name, width=128)
+                        continue
+                    except Exception:
+                        pass
+                st.markdown(
+                    f"<div class='attachment-card'>Image · {safe_name}</div>",
+                    unsafe_allow_html=True,
+                )
+
+    for item in file_items:
+        name = item.get("name") or Path(item.get("path", "")).name or "file"
+        suffix = Path(name).suffix.upper().lstrip(".") or "FILE"
+        safe_name = html.escape(name)
+        safe_suffix = html.escape(suffix)
+        st.markdown(
+            f"""
+            <div class="attachment-card">
+              <span class="attachment-icon">📄</span>
+              <span class="attachment-name">{safe_name}</span>
+              <span class="attachment-type">{safe_suffix}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 def _render_chat_message(message: dict[str, Any]) -> None:
-    st.markdown(message["content"])
+    display_content = message.get("display_content", message.get("content", ""))
+    display_content = _sanitize_local_paths_for_display(display_content)
+    if display_content:
+        st.markdown(display_content)
+    _render_attachments(message.get("attachments", []) or [])
     for image_path in message.get("images", []) or []:
         if Path(image_path).exists():
             st.image(image_path, caption=Path(image_path).name, width=420)
@@ -530,7 +613,9 @@ def _init_state() -> None:
         "model_signature": None,        # identifies the active (model, cfg, temp_dir)
         "uploads_dir": None,            # path of saved uploaded files
         "uploaded_files": [],           # filenames
+        "session_temp_dir": None,       # stable temp dir for this Streamlit session
         "pending_question": None,       # question loaded from benchmark, awaiting send
+        "pending_assistant": False,     # run the agent after the next rerun
         "last_answer_meta": None,       # info about the last assistant turn
     }
     for k, v in defaults.items():
@@ -545,12 +630,285 @@ _init_state()
 # Streamlit – sidebar (model + advanced settings)
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Earth Agent",
+    page_title="Disaster Detection Agent",
     page_icon="🌍",
     layout="wide",
 )
 
-st.sidebar.title("⚙️ Configuration")
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: 1040px;
+        padding-top: 0.75rem;
+        padding-bottom: 13.5rem;
+        position: relative;
+        box-sizing: border-box;
+        min-height: 0;
+    }
+    [data-testid="stSidebar"] {
+        background: #f7f7f8;
+        border-right: 1px solid #e5e5e5;
+    }
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {
+        color: #202123;
+    }
+    div[data-testid="stChatMessage"] {
+        background: transparent;
+        padding: 0.85rem 0;
+        border-bottom: 1px solid #f0f0f0;
+    }
+    div[data-testid="stChatMessage"]:last-of-type {
+        border-bottom: 0;
+    }
+    div[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] {
+        line-height: 1.65;
+    }
+    div[data-testid="stChatInput"] {
+        position: fixed !important;
+        left: calc(240px + (100vw - 240px) / 2) !important;
+        bottom: 1.4rem !important;
+        width: min(980px, calc(100vw - 240px - 4rem)) !important;
+        transform: translateX(-50%);
+        z-index: 50 !important;
+        margin: 0 !important;
+    }
+    div[data-testid="stElementContainer"]:has(div[data-testid="stChatInput"]),
+    div[data-testid="stVerticalBlock"]:has(> div[data-testid="stChatInput"]) {
+        height: 0 !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: visible !important;
+        background: transparent !important;
+    }
+    div[data-testid="stBottom"],
+    div[data-testid="stBottomBlockContainer"],
+    div[data-testid="stBottom"] > div,
+    div[data-testid="stBottomBlockContainer"] > div,
+    section[data-testid="stMain"] div:has(> div[data-testid="stChatInput"]) {
+        background: transparent !important;
+        background-color: transparent !important;
+        box-shadow: none !important;
+    }
+    div[data-testid="stBottom"]::before,
+    div[data-testid="stBottom"]::after,
+    div[data-testid="stBottomBlockContainer"]::before,
+    div[data-testid="stBottomBlockContainer"]::after,
+    section[data-testid="stMain"] div:has(> div[data-testid="stChatInput"])::before,
+    section[data-testid="stMain"] div:has(> div[data-testid="stChatInput"])::after {
+        background: transparent !important;
+        background-image: none !important;
+        box-shadow: none !important;
+    }
+    div[data-testid="stChatInput"] > div {
+        border-radius: 26px;
+        background: #ffffff;
+        border: 1px solid #d6d6dd;
+        box-shadow: 0 18px 48px rgba(0, 0, 0, 0.10);
+        padding: 0.25rem 0.5rem;
+    }
+    div[data-testid="stChatInput"] > div:focus-within {
+        border-color: #d6d6dd !important;
+        box-shadow: 0 18px 48px rgba(0, 0, 0, 0.10) !important;
+        outline: none !important;
+    }
+    div[data-testid="stChatInput"] textarea {
+        border: 0;
+        box-shadow: none;
+        background: #ffffff !important;
+        background-color: #ffffff !important;
+        min-height: 68px;
+        font-size: 0.98rem;
+        padding: 1rem 0.6rem;
+    }
+    div[data-testid="stChatInput"] textarea:focus,
+    div[data-testid="stChatInput"] textarea:focus-visible,
+    div[data-testid="stChatInput"] [contenteditable="true"],
+    div[data-testid="stChatInput"] [contenteditable="true"]:focus {
+        background: #ffffff !important;
+        background-color: #ffffff !important;
+        border-color: transparent !important;
+        box-shadow: none !important;
+        outline: none !important;
+    }
+    div[data-testid="stChatInput"] button {
+        color: #4f4f5f;
+        background: #ffffff;
+        border-color: transparent;
+        min-width: 38px;
+        min-height: 38px;
+        border-radius: 999px;
+        opacity: 1;
+        visibility: visible;
+    }
+    div[data-testid="stChatInput"] button:hover,
+    div[data-testid="stChatInput"] button:focus,
+    div[data-testid="stChatInput"] button:active {
+        color: #202123;
+        background: #f4f4f5;
+        border-color: #ececf1;
+        box-shadow: none;
+    }
+    div[data-testid="stChatInput"] svg {
+        color: #4f4f5f;
+        opacity: 1;
+        visibility: visible;
+    }
+    div[data-testid="stChatInput"] [data-testid="stBaseButton-secondary"],
+    div[data-testid="stChatInput"] [data-testid="stBaseButton-primary"] {
+        background: #ffffff;
+        border-color: transparent;
+        color: #4f4f5f;
+        opacity: 1;
+        visibility: visible;
+    }
+    div[data-testid="stChatInput"] [data-testid="stBaseButton-secondary"]:hover,
+    div[data-testid="stChatInput"] [data-testid="stBaseButton-primary"]:hover {
+        background: #f4f4f5;
+        border-color: #ececf1;
+        color: #202123;
+    }
+    div[data-testid="stChatInput"] [data-testid="stFileUploaderDropzone"],
+    div[data-testid="stChatInput"] [data-testid="stFileUploader"] {
+        background: #ffffff;
+        border-color: #d6d6dd;
+        color: #202123;
+    }
+    div[data-testid="stChatInput"] [data-testid="stFileUploaderFile"] {
+        background: #f7f7f8;
+        border-color: #e5e5e5;
+        color: #202123;
+    }
+    div[data-testid="stChatInput"] [role="progressbar"] > div,
+    div[data-testid="stChatInput"] progress::-webkit-progress-value {
+        background-color: #6e6e80;
+    }
+    .earth-agent-empty {
+        text-align: center;
+        color: #202123;
+        min-height: calc(100vh - 15rem);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 0 0 4rem;
+    }
+    .earth-agent-empty h2 {
+        font-size: 1.8rem;
+        font-weight: 650;
+        margin-bottom: 0.4rem;
+    }
+    .earth-agent-empty p {
+        color: #6e6e80;
+        margin: 0;
+    }
+    .upload-note {
+        color: #6e6e80;
+        font-size: 0.88rem;
+        margin-top: 0.35rem;
+    }
+    .attachment-card {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        max-width: 360px;
+        margin: 0.35rem 0.35rem 0.15rem 0;
+        padding: 0.62rem 0.75rem;
+        border: 1px solid #e5e5e5;
+        border-radius: 10px;
+        background: #ffffff;
+        color: #202123;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+        vertical-align: top;
+    }
+    .attachment-icon {
+        flex: 0 0 auto;
+        font-size: 1.05rem;
+        line-height: 1;
+    }
+    .attachment-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 0.92rem;
+    }
+    .attachment-type {
+        flex: 0 0 auto;
+        color: #6e6e80;
+        font-size: 0.72rem;
+        font-weight: 600;
+    }
+    .chat-bottom-spacer {
+        height: 10rem;
+    }
+    @media (max-width: 768px) {
+        div[data-testid="stChatInput"] {
+            left: 50% !important;
+            width: calc(100vw - 1.5rem) !important;
+            bottom: 0.75rem !important;
+        }
+    }
+    div[data-testid="stAlert"] {
+        background: #f7f7f8;
+        color: #202123;
+        border: 1px solid #e5e5e5;
+        border-radius: 10px;
+    }
+    div[data-testid="stStatusWidget"] {
+        border: 1px solid #e5e5e5;
+        background: #ffffff;
+        border-radius: 10px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+if WATERMARK_LOGO.exists():
+    watermark_data = base64.b64encode(WATERMARK_LOGO.read_bytes()).decode("ascii")
+    st.markdown(
+        f"""
+        <style>
+        .stApp::before {{
+            content: "";
+            position: fixed;
+            left: calc(240px + (100vw - 240px) / 2);
+            top: 50%;
+            width: min(52vw, 620px);
+            aspect-ratio: 1;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            background-image: url("data:image/png;base64,{watermark_data}");
+            background-repeat: no-repeat;
+            background-position: center;
+            background-size: contain;
+            opacity: 0.055;
+            z-index: 0;
+        }}
+        section[data-testid="stMain"],
+        section[data-testid="stMain"] > div {{
+            position: relative;
+            z-index: 1;
+        }}
+        [data-testid="stSidebar"] {{
+            z-index: 2;
+        }}
+        @media (max-width: 768px) {{
+            .stApp::before {{
+                left: 50%;
+                width: min(78vw, 480px);
+            }}
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+st.sidebar.title("Disaster Detection Agent")
 
 configs = list_model_configs()
 if not configs:
@@ -559,24 +917,19 @@ if not configs:
     )
     st.stop()
 
-cfg_idx = st.sidebar.selectbox(
-    "Model configuration",
-    range(len(configs)),
-    format_func=lambda i: f"{configs[i]['name']} — {configs[i]['model_name']}",
-    help="Models are loaded from `agent/config_*.json`.",
+default_cfg_idx = next(
+    (
+        i
+        for i, cfg in enumerate(configs)
+        if "qwen" in f"{cfg['name']} {cfg['model_name']}".lower()
+    ),
+    0,
 )
+cfg_idx = default_cfg_idx
 selected = configs[cfg_idx]
-
-# Override credentials in the UI
-with st.sidebar.expander("API credentials (override)"):
-    st.caption(
-        f"From config: **{selected['model_name']}** — "
-        f"key `{_mask_key(selected['api_key'])}`, "
-        f"endpoint `{selected['base_url'] or '(default)'}`"
-    )
-    api_key = st.text_input("API key", value=selected["api_key"], type="password")
-    base_url = st.text_input("Base URL", value=selected["base_url"])
-    model_name = st.text_input("Model name", value=selected["model_name"])
+api_key = selected["api_key"]
+base_url = selected["base_url"]
+model_name = selected["model_name"]
 
 # System prompt
 enhanced_prompt = _find_enhanced_system_prompt(selected["name"]) or _find_enhanced_system_prompt(
@@ -618,18 +971,10 @@ st.session_state["show_tool_trace"] = show_tool_trace
 st.sidebar.divider()
 if st.sidebar.button("🗑️ Clear chat history"):
     st.session_state.messages = []
+    st.session_state.pending_assistant = False
     st.session_state.last_answer_meta = None
     st.rerun()
 
-
-# ---------------------------------------------------------------------------
-# Streamlit – main layout
-# ---------------------------------------------------------------------------
-st.title("🌍 Earth Agent — interactive UI")
-st.caption(
-    "Run the LangChain ReAct agent over the MCP tool stack. Pick a model, "
-    "load a benchmark question (or write your own), upload data, and chat."
-)
 
 # Build (or rebuild) the agent when the signature changes.
 signature = (
@@ -645,7 +990,9 @@ if st.session_state.model_signature != signature:
     st.session_state.model_signature = signature
 
 # Unique temp dir for this session so file outputs don't collide
-session_temp = TEMP_BASE / str(uuid.uuid4().hex[:12])
+if not st.session_state.session_temp_dir:
+    st.session_state.session_temp_dir = str(TEMP_BASE / str(uuid.uuid4().hex[:12]))
+session_temp = Path(st.session_state.session_temp_dir)
 session_temp.mkdir(parents=True, exist_ok=True)
 (session_temp / "out").mkdir(parents=True, exist_ok=True)
 
@@ -659,184 +1006,51 @@ try:
         generate_args_json=json.dumps(selected.get("generate_args", {})),
         temp_dir=str(session_temp),
     )
-    st.sidebar.success(
-        f"Agent ready · {len(handle.tools)} tools loaded", icon="✅"
-    )
+    st.sidebar.caption(f"Ready · {len(handle.tools)} tools loaded")
 except Exception as exc:  # noqa: BLE001
     st.sidebar.error(f"Failed to initialise agent: {exc}")
     st.stop()
 
-tabs = st.tabs(["💬 Chat", "📋 Benchmark question", "📂 Upload data", "🛠️ Model info"])
-
 
 # ---------------------------------------------------------------------------
-# Tab 2 – Benchmark question loader
+# Chat
 # ---------------------------------------------------------------------------
-with tabs[1]:
-    st.subheader("Load a benchmark question")
-    questions = load_questions()
-    qids = list(questions.keys())
-    qid = st.selectbox(
-        "Question ID",
-        qids,
-        index=0,
-        format_func=lambda k: _question_summary(k, questions[k]),
-    )
-    info = questions[qid]
-    user_text = (info.get("dialogs") or [{}])[0].get("content", "")
-    eval_block = info.get("evaluation") or [{}]
-    data_path = next(
-        (e.get("data") for e in eval_block if e.get("data")),
-        None,
-    )
-    choices = info.get("choices") or []
+pending = st.session_state.pop("pending_question", None)
+if pending:
+    st.session_state.messages.append({"role": "user", "content": pending})
+    st.session_state.pending_assistant = True
 
-    st.markdown("**Question text**")
-    st.text_area("Question text area", value=user_text, height=160, label_visibility="collapsed", key=f"q_text_{qid}")
-
-    cols = st.columns(2)
-    with cols[0]:
-        st.markdown("**Data directory**")
-        st.code(data_path or "(not specified)", language="text")
-    with cols[1]:
-        st.markdown("**Choices**")
-        if choices:
-            for i, c in enumerate(choices):
-                st.write(f"{chr(65 + i)}. {c}")
-        else:
-            st.write("(open-ended)")
-
-    st.caption(
-        "Clicking *Load* adds the question to the chat input. You can also "
-        "edit the chat text directly before sending."
+if st.session_state.messages:
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"]):
+            _render_chat_message(m)
+else:
+    st.markdown(
+        """
+        <div class="earth-agent-empty">
+          <h2>What can I help analyze?</h2>
+          <p>Ask about disaster damage, flood inundation, indices, statistics, or attach files below.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    if st.button("➕ Load into chat", key="load_q"):
-        text = user_text
-        if data_path:
-            text += f"\n\nRelevant data directory: `{data_path}`"
-        if choices:
-            text += "\n\nChoices:\n" + "\n".join(
-                f"{chr(65 + i)}. {c}" for i, c in enumerate(choices)
-            )
-        st.session_state.pending_question = text
-        st.toast("Question loaded into the chat tab ✉️", icon="✅")
-
-
-# ---------------------------------------------------------------------------
-# Tab 3 – File uploads
-# ---------------------------------------------------------------------------
-with tabs[2]:
-    st.subheader("Upload data files")
-    st.write(
-        "Upload raster / vector / image files for the agent to work with. "
-        "They will be saved into a session-specific directory the agent can "
-        "call `get_filelist` on."
-    )
-    uploads = st.file_uploader(
-        "Select one or more files",
-        accept_multiple_files=True,
-        type=None,
-    )
-    cols = st.columns([1, 1, 3])
-    with cols[0]:
-        if st.button("💾 Save uploads", disabled=not uploads):
-            target = session_temp / "uploads"
-            if target.exists():
-                shutil.rmtree(target)
-            target.mkdir(parents=True, exist_ok=True)
-            for f in uploads:
-                with open(target / f.name, "wb") as out:
-                    out.write(f.getbuffer())
-            st.session_state.uploads_dir = str(target)
-            st.session_state.uploaded_files = sorted(p.name for p in uploads)
-            st.success(f"Saved {len(uploads)} file(s) to {target}")
-    with cols[1]:
-        if st.button("♻️ Reset uploads"):
-            st.session_state.uploads_dir = None
-            st.session_state.uploaded_files = []
-            st.info("Cleared upload directory")
-
+ran_assistant = bool(st.session_state.pending_assistant)
+if ran_assistant:
+    data_roots: list[str] = [str(BENCHMARK_DATA_DIR)]
     if st.session_state.uploads_dir:
-        st.markdown("**Current upload directory**")
-        st.code(st.session_state.uploads_dir, language="text")
-        st.markdown("**Files**")
-        for name in st.session_state.uploaded_files:
-            st.write(f"- {name}")
-    else:
-        st.info("No files uploaded yet.")
-
-
-# ---------------------------------------------------------------------------
-# Tab 4 – Model info
-# ---------------------------------------------------------------------------
-with tabs[3]:
-    st.subheader("Active model")
-    if handle is None:
-        st.warning("Agent not initialised – see the error in the sidebar.")
-    else:
-        st.json(
-            {
-                "config_file": selected["path"],
-                "config_name": selected["name"],
-                "model_name": model_name,
-                "base_url": base_url or "(default OpenAI)",
-                "api_key": _mask_key(api_key),
-                "mcp_servers": list(selected["mcp_servers"].keys()),
-                "tools_loaded": [t.name for t in handle.tools],
-                "session_temp_dir": str(session_temp),
-                "recursion_limit": recursion_limit,
-                "max_execution_time_s": max_exec_seconds,
-            }
-        )
-        st.subheader("Loaded tool list")
-        for t in handle.tools:
-            with st.expander(f"🔧 {t.name}", expanded=False):
-                st.write(t.description or "(no description)")
-
-
-# ---------------------------------------------------------------------------
-# Tab 1 – Chat
-# ---------------------------------------------------------------------------
-with tabs[0]:
-    st.subheader("Chat with the agent")
-
-    # A pending benchmark question can be injected via the "load" button.
-    pending = st.session_state.pop("pending_question", None)
-    if pending:
-        # Persist into the chat history so it survives subsequent reruns and
-        # is rendered by the loop below.
-        st.session_state.messages.append({"role": "user", "content": pending})
-
-    user_text = st.chat_input(
-        "Ask Earth Agent… (Shift+Enter for newline)",
-        key="chat_input",
+        data_roots.append(st.session_state.uploads_dir)
+    data_roots.append(str(session_temp / "out"))
+    effective_system_prompt = build_system_prompt(system_prompt, data_roots)
+    lc_messages = _build_messages(
+        st.session_state.messages, effective_system_prompt
     )
 
-    if user_text:
-        # Append user turn
-        st.session_state.messages.append({"role": "user", "content": user_text})
-        with st.chat_message("user"):
-            st.markdown(user_text)
-
-        # Build the message list the agent will see. We enrich the system
-        # prompt with the list of directories the agent is allowed to
-        # inspect via `get_filelist`, so it does not guess paths like
-        # /home/ubuntu that the OS will reject.
-        data_roots: list[str] = [str(BENCHMARK_DATA_DIR)]
-        if st.session_state.uploads_dir:
-            data_roots.append(st.session_state.uploads_dir)
-        data_roots.append(str(session_temp / "out"))
-        effective_system_prompt = build_system_prompt(system_prompt, data_roots)
-        lc_messages = _build_messages(
-            st.session_state.messages, effective_system_prompt
-        )
-
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            status = st.status("Agent is thinking…", expanded=False)
-            t0 = time.time()
-            try:
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        t0 = time.time()
+        try:
+            with st.spinner("Thinking..."):
                 response = handle.invoke(
                     lc_messages,
                     config={
@@ -844,57 +1058,113 @@ with tabs[0]:
                         "max_execution_time": max_exec_seconds,
                     },
                 )
-            except Exception as exc:  # noqa: BLE001
-                status.update(label="Agent error", state="error")
-                st.error("".join(traceback.format_exception(exc)))
-                st.stop()
-            elapsed = time.time() - t0
+        except Exception as exc:  # noqa: BLE001
+            error_text = "".join(traceback.format_exception(exc))
+            st.error(error_text)
+            memory_matches = ERROR_MEMORY.lookup_all(error_text)
+            if memory_matches:
+                st.warning("Matched error-memory suggestion(s):")
+                for pattern, fix in memory_matches:
+                    st.markdown(f"- `{pattern}`: {fix}")
+            st.stop()
+        elapsed = time.time() - t0
 
-            raw_answer = _last_ai_message(response)
-            final_answer = extract_final_answer(raw_answer)
-            trace = _tool_trace(response)
-            images = _extract_damage_overlay_paths(response, raw_answer, final_answer)
+        raw_answer = _last_ai_message(response)
+        final_answer = extract_final_answer(raw_answer)
+        trace = _tool_trace(response)
+        images = _extract_damage_overlay_paths(response, raw_answer, final_answer)
+        answer_for_display = _sanitize_local_paths_for_display(
+            final_answer or raw_answer
+        )
 
-            status.update(
-                label=f"Done in {elapsed:.1f}s · {len(trace)} tool call(s)",
-                state="complete",
-            )
+        placeholder.markdown(answer_for_display or "_(empty response)_")
+        st.caption(f"{elapsed:.1f}s · {len(trace)} tool call(s)")
+        for image_path in images:
+            st.image(image_path, caption=Path(image_path).name, width=420)
 
-            placeholder.markdown(final_answer or "_(empty response)_")
-            for image_path in images:
-                st.image(image_path, caption=Path(image_path).name, width=420)
-
-            st.session_state.messages.append(
-                {
-                    "role": "assistant",
-                    "content": final_answer or raw_answer,
-                    "images": images,
-                }
-            )
-            st.session_state.last_answer_meta = {
-                "elapsed": elapsed,
-                "tool_calls": len(trace),
-                "raw_answer": raw_answer,
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": final_answer or raw_answer,
                 "images": images,
             }
-
-        if show_tool_trace:
-            with st.expander("Tool-call trace (advanced)", expanded=False):
-                for i, step in enumerate(trace, 1):
-                    st.markdown(f"**Step {i} — `{step['name']}`**")
-                    st.json(step.get("args") or {})
-                    st.code(step.get("result") or "", language="text")
-
-    # Render previous messages on rerun. During a fresh submit, the current
-    # user/assistant turns have already been rendered above.
-    if not user_text:
-        for m in st.session_state.messages:
-            with st.chat_message(m["role"]):
-                _render_chat_message(m)
-
-    if st.session_state.last_answer_meta and not user_text:
-        meta = st.session_state.last_answer_meta
-        st.caption(
-            f"Last response: {meta['elapsed']:.1f}s · "
-            f"{meta['tool_calls']} tool call(s)."
         )
+        st.session_state.last_answer_meta = {
+            "elapsed": elapsed,
+            "tool_calls": len(trace),
+            "raw_answer": raw_answer,
+            "images": images,
+        }
+        st.session_state.pending_assistant = False
+
+    if show_tool_trace:
+        with st.expander("Tool-call trace (advanced)", expanded=False):
+            for i, step in enumerate(trace, 1):
+                st.markdown(f"**Step {i} — `{step['name']}`**")
+                st.json(step.get("args") or {})
+                st.code(step.get("result") or "", language="text")
+
+if st.session_state.last_answer_meta and not ran_assistant:
+    meta = st.session_state.last_answer_meta
+    st.caption(
+        f"Last response: {meta['elapsed']:.1f}s · "
+        f"{meta['tool_calls']} tool call(s)."
+    )
+
+if st.session_state.messages:
+    st.markdown('<div class="chat-bottom-spacer"></div>', unsafe_allow_html=True)
+
+chat_value = st.chat_input(
+    "Ask anything, or attach raster/image files",
+    key="chat_input",
+    accept_file="multiple",
+)
+
+if chat_value:
+    if isinstance(chat_value, str):
+        user_text = chat_value
+        uploaded_files = []
+    else:
+        user_text = getattr(chat_value, "text", "") or ""
+        uploaded_files = list(getattr(chat_value, "files", []) or [])
+
+    uploaded_paths: list[str] = []
+    attachments: list[dict[str, str]] = []
+    if uploaded_files:
+        target = session_temp / "uploads"
+        target.mkdir(parents=True, exist_ok=True)
+        for f in uploaded_files:
+            save_path = target / f.name
+            with open(save_path, "wb") as out:
+                out.write(f.getbuffer())
+            uploaded_paths.append(str(save_path))
+            attachments.append(
+                {
+                    "name": f.name,
+                    "path": str(save_path),
+                    "type": "image" if _is_image_file(str(save_path)) else "file",
+                }
+            )
+        st.session_state.uploads_dir = str(target)
+        st.session_state.uploaded_files = sorted(
+            {*(st.session_state.uploaded_files or []), *(f.name for f in uploaded_files)}
+        )
+
+    content_parts = [user_text.strip()] if user_text.strip() else []
+    if uploaded_paths:
+        content_parts.append(
+            "Uploaded files:\n" + "\n".join(f"- `{path}`" for path in uploaded_paths)
+        )
+    user_content = "\n\n".join(content_parts) or "Please analyze the uploaded file(s)."
+    display_content = user_text.strip() or "Please analyze the uploaded file(s)."
+
+    st.session_state.messages.append(
+        {
+            "role": "user",
+            "content": user_content,
+            "display_content": display_content,
+            "attachments": attachments,
+        }
+    )
+    st.session_state.pending_assistant = True
+    st.rerun()
