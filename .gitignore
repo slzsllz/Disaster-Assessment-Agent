@@ -4,6 +4,7 @@ evaluate_langchain/
 logs/
 Xview2_Strong_Baseline-master/
 sen1floods11-segmentation-main/
+tmp/
 
 # Environment variables and secrets
 .env
@@ -55,3 +56,8 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Model folder
+Xview2_Strong_Baseline-master/
+sen1floods11-segmentation-main/
+GeoAIModels/
