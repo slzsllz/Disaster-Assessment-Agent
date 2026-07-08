@@ -14,6 +14,7 @@ Supported models (stored in GeoAIModels/):
 """
 
 import argparse
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -186,8 +187,21 @@ def _get_detector(task: str, device: Optional[str] = None):
 
 
 def _gdf_to_summary(gdf, task: str) -> Dict[str, Any]:
-    """Summarise a GeoDataFrame of detections into a JSON-serialisable dict."""
+    """Summarise a GeoDataFrame of detections into a JSON-serialisable dict.
+
+    ``gdf`` may be ``None`` when ``process_raster`` finds no valid polygons —
+    in that case we report zero objects instead of crashing on ``len(None)``.
+    """
     import geopandas as gpd  # noqa: F401
+
+    if gdf is None:
+        return {
+            "task": task,
+            "description": DETECTION_MODELS[task]["description"],
+            "num_objects": 0,
+            "columns": [],
+            "note": "No objects detected above the confidence threshold.",
+        }
 
     num_objects = len(gdf)
     summary: Dict[str, Any] = {
@@ -226,6 +240,252 @@ def _gdf_to_summary(gdf, task: str) -> Dict[str, Any]:
         pass
 
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Library-compat patches – work around geoai bugs that crash on real-world input
+# ---------------------------------------------------------------------------
+
+def _patch_dataset_channels(target_channels: int) -> None:
+    """Patch geoai's ``CustomDataset`` to produce *target_channels* bands per
+    chip instead of the hardcoded 3.
+
+    The upstream ``__getitem__`` forces every chip to exactly 3 channels
+    (duplicating the last band when fewer, slicing when more). That breaks
+    4-band RGBN models whose ``image_mean``/``image_std`` have 4 entries —
+    the model's internal Normalize raises ``tensor (3) vs (4)``. We wrap
+    the original method to re-pad to the model's expected channel count.
+    """
+    import geoai
+    import torch
+
+    geoai.CustomDataset._target_channels = target_channels
+
+    if getattr(geoai.CustomDataset, "_channels_patched", False):
+        return
+
+    _original_getitem = geoai.CustomDataset.__getitem__
+
+    def _getitem_patched(self, idx):
+        result = _original_getitem(self, idx)
+        target = getattr(self, "_target_channels", 3)
+        img = result["image"]
+        if img.shape[0] != target:
+            new_img = torch.zeros(
+                (target, *img.shape[1:]), dtype=img.dtype, device=img.device
+            )
+            for c in range(target):
+                new_img[c] = img[min(c, img.shape[0] - 1)]
+            result["image"] = new_img
+        return result
+
+    geoai.CustomDataset.__getitem__ = _getitem_patched
+    geoai.CustomDataset._channels_patched = True
+
+
+@contextlib.contextmanager
+def _fix_nodata_open():
+    """Temporarily patch ``rasterio.open`` to strip NaN/Inf nodata from
+    *write* calls.
+
+    geoai's ``semantic_inference_on_geotiff`` copies the source profile
+    (which may carry ``nodata=nan``) and only updates ``dtype`` to ``uint8``
+    for the mask output. ``nan`` is not a valid nodata for integer dtypes,
+    so ``rasterio.open(path, "w", **out_meta)`` raises
+    ``ValueError: Given nodata value, nan, is beyond the valid range of its
+    data type, uint8``. This context manager intercepts write-mode opens and
+    drops the offending nodata value.
+    """
+    import math
+    import rasterio
+
+    _original_open = rasterio.open
+
+    def _patched_open(*args, **kwargs):
+        mode = args[1] if len(args) > 1 else kwargs.get("mode", "r")
+        if mode == "w" and "nodata" in kwargs and kwargs["nodata"] is not None:
+            nd = kwargs["nodata"]
+            try:
+                if isinstance(nd, float) and (math.isnan(nd) or math.isinf(nd)):
+                    kwargs["nodata"] = None
+            except TypeError:
+                pass
+        return _original_open(*args, **kwargs)
+
+    rasterio.open = _patched_open
+    try:
+        yield
+    finally:
+        rasterio.open = _original_open
+
+
+# ---------------------------------------------------------------------------
+# Visualization helpers – produce PNG overlays the chat UI can render inline
+# ---------------------------------------------------------------------------
+
+def _read_rgb_for_display(raster_path: str):
+    """Read up to 3 bands from *raster_path* and return a display-ready RGB
+    uint8 array plus the raster bounds/crs. Bands are percentile-stretched."""
+    import numpy as np
+    import rasterio
+
+    with rasterio.open(raster_path) as src:
+        n = min(3, src.count)
+        data = src.read(list(range(1, n + 1))).astype(np.float32)
+        for i in range(data.shape[0]):
+            p2, p98 = np.percentile(data[i], [2, 98])
+            if p98 > p2:
+                data[i] = np.clip((data[i] - p2) / (p98 - p2), 0, 1)
+        if n == 1:
+            data = np.repeat(data, 3, axis=0)
+        elif n == 2:
+            data = np.concatenate([data, data[:1]], axis=0)
+        rgb = np.moveaxis(data, 0, -1)
+        rgb = (rgb * 255).astype(np.uint8)
+        return rgb, src.bounds, src.crs
+
+
+def _save_detection_overlay(
+    raster_path: str, geojson_path: str, output_png: str, task: str
+) -> None:
+    """Overlay detected polygons on the raster and save as PNG."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import geopandas as gpd
+    from pathlib import Path
+
+    rgb, bounds, crs = _read_rgb_for_display(raster_path)
+    extent = [bounds.left, bounds.right, bounds.bottom, bounds.top]
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(rgb, extent=extent, origin="upper")
+
+    if Path(geojson_path).exists():
+        try:
+            gdf = gpd.read_file(geojson_path)
+            if len(gdf) > 0:
+                if gdf.crs is not None and crs is not None and gdf.crs != crs:
+                    gdf = gdf.to_crs(crs)
+                gdf.plot(
+                    ax=ax, facecolor="none", edgecolor="#ff3030", linewidth=1.0
+                )
+        except Exception:
+            pass
+
+    ax.set_axis_off()
+    ax.set_title(f"{task} detection ({Path(geojson_path).stem})", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(output_png, dpi=120, bbox_inches="tight", pad_inches=0.05)
+    plt.close(fig)
+
+
+def _save_segmentation_overlay(
+    input_path: str, mask_path: str, output_png: str, model_name: str
+) -> None:
+    """Render a segmentation mask as a colourised overlay on the input image."""
+    import numpy as np
+    import rasterio
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from PIL import Image
+
+    with rasterio.open(mask_path) as src:
+        mask = src.read(1)
+
+    try:
+        rgb, _, _ = _read_rgb_for_display(input_path)
+        if rgb.shape[:2] != mask.shape:
+            pil = Image.fromarray(rgb)
+            pil = pil.resize((mask.shape[1], mask.shape[0]), Image.LANCZOS)
+            rgb = np.array(pil)
+    except Exception:
+        rgb = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(rgb)
+    overlay = np.zeros((*mask.shape, 4), dtype=np.float32)
+    overlay[mask > 0] = [0.0, 0.75, 1.0, 0.45]
+    ax.imshow(overlay)
+    ax.set_axis_off()
+    ax.set_title(f"{model_name} segmentation", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(output_png, dpi=120, bbox_inches="tight", pad_inches=0.05)
+    plt.close(fig)
+
+
+def _save_similarity_overlay(
+    similarity_path: str, output_png: str, query_point=None
+) -> None:
+    """Render the DINOv3 similarity map as a heatmap PNG."""
+    import numpy as np
+    import rasterio
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from PIL import Image
+
+    if similarity_path.lower().endswith((".tif", ".tiff")):
+        with rasterio.open(similarity_path) as src:
+            sim = src.read(1)
+            extent = [
+                src.bounds.left, src.bounds.right,
+                src.bounds.bottom, src.bounds.top,
+            ]
+            use_extent = src.crs is not None
+    else:
+        sim = np.array(Image.open(similarity_path).convert("L"), dtype=np.float32) / 255.0
+        extent = None
+        use_extent = False
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    im = ax.imshow(
+        sim, cmap="hot", origin="upper",
+        extent=extent if use_extent else None,
+        vmin=float(sim.min()), vmax=float(sim.max()),
+    )
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="similarity")
+    if query_point is not None:
+        ax.plot(query_point[0], query_point[1], "c+", markersize=18, mew=3)
+    ax.set_axis_off()
+    ax.set_title("DINOv3 patch similarity", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(output_png, dpi=120, bbox_inches="tight", pad_inches=0.05)
+    plt.close(fig)
+
+
+def _save_features_preview(features_npy: str, output_png: str) -> None:
+    """Render a PCA (top-3 components) preview of DINOv3 patch features."""
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    data = np.load(features_npy)  # (h_patches, w_patches, embed_dim)
+    h, w, d = data.shape
+    flat = data.reshape(-1, d).astype(np.float32)
+    flat -= flat.mean(axis=0, keepdims=True)
+    try:
+        # Economy SVD → principal components
+        U, S, Vt = np.linalg.svd(flat, full_matrices=False)
+        pc = (flat @ Vt[:3].T).reshape(h, w, 3)
+    except Exception:
+        pc = flat.reshape(h, w, d)[..., :3]
+
+    for i in range(pc.shape[-1]):
+        lo, hi = pc[..., i].min(), pc[..., i].max()
+        if hi > lo:
+            pc[..., i] = (pc[..., i] - lo) / (hi - lo)
+    pc = np.clip(pc, 0, 1)
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(pc)
+    ax.set_axis_off()
+    ax.set_title("DINOv3 features (PCA preview)", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(output_png, dpi=120, bbox_inches="tight", pad_inches=0.05)
+    plt.close(fig)
 
 
 def _create_dinov3_processor(
@@ -271,6 +531,26 @@ def _create_dinov3_processor(
         )
     finally:
         geoai.DINOv3GeoProcessor._load_model = original
+
+    # The upstream preprocess_image_for_dinov3 only handles 1-band and >3-band
+    # inputs, but a 2-band GeoTIFF slips through and produces a 2-channel PIL
+    # image that crashes the torchvision Normalize transform (expects 3). Wrap
+    # it so any sub-3-band array is padded to 3 channels first.
+    import numpy as _np
+    _original_preprocess = processor.preprocess_image_for_dinov3
+
+    def _safe_preprocess(data, target_size=896, normalize_percentile=True):
+        if isinstance(data, _np.ndarray):
+            if data.ndim == 2:
+                data = _np.repeat(data[_np.newaxis, :, :], 3, axis=0)
+            elif data.ndim == 3 and data.shape[0] < 3:
+                if data.shape[0] == 1:
+                    data = _np.repeat(data, 3, axis=0)
+                else:  # 2 bands → append the first band as a third
+                    data = _np.concatenate([data, data[:1]], axis=0)
+        return _original_preprocess(data, target_size, normalize_percentile)
+
+    processor.preprocess_image_for_dinov3 = _safe_preprocess
     return processor
 
 
@@ -333,6 +613,10 @@ def geoai_object_detection(
 
     geojson_path = out_dir / f"{task}_detections.geojson"
 
+    # Ensure the dataset feeds the model the right number of bands (upstream
+    # CustomDataset hardcodes 3, which crashes 4-band RGBN models).
+    _patch_dataset_channels(DETECTION_MODELS[task]["channels"])
+
     gdf = detector.process_raster(
         raster_path=raster_path,
         output_path=str(geojson_path),
@@ -346,6 +630,16 @@ def geoai_object_detection(
     summary["model_file"] = DETECTION_MODELS[task]["file"]
     summary["geojson_path"] = str(geojson_path)
     summary["raster_path"] = raster_path
+
+    # Render a PNG overlay the chat UI can display inline
+    overlay_path = out_dir / f"{task}_overlay.png"
+    try:
+        _save_detection_overlay(
+            raster_path, str(geojson_path), str(overlay_path), task
+        )
+        summary["overlay_path"] = str(overlay_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Detection overlay rendering failed: %s", exc)
 
     # Save summary JSON
     summary_path = out_dir / f"{task}_summary.json"
@@ -419,21 +713,25 @@ def geoai_semantic_segmentation(
     output_path = out_dir / f"{model}_mask.tif"
     prob_path = out_dir / f"{model}_probability.tif" if probability_threshold is not None else None
 
-    geoai.semantic_segmentation(
-        input_path=input_path,
-        output_path=str(output_path),
-        model_path=model_path,
-        architecture=cfg["architecture"],
-        encoder_name=cfg["encoder_name"],
-        num_channels=cfg["num_channels"],
-        num_classes=cfg["num_classes"],
-        window_size=window_size,
-        overlap=overlap,
-        batch_size=batch_size,
-        device=device,
-        probability_path=str(prob_path) if prob_path else None,
-        probability_threshold=probability_threshold,
-    )
+    # geoai copies the source profile (which may carry nodata=nan) into the
+    # uint8 mask output; nan is invalid for uint8 and crashes rasterio.open.
+    # The context manager strips NaN/Inf nodata from write calls.
+    with _fix_nodata_open():
+        geoai.semantic_segmentation(
+            input_path=input_path,
+            output_path=str(output_path),
+            model_path=model_path,
+            architecture=cfg["architecture"],
+            encoder_name=cfg["encoder_name"],
+            num_channels=cfg["num_channels"],
+            num_classes=cfg["num_classes"],
+            window_size=window_size,
+            overlap=overlap,
+            batch_size=batch_size,
+            device=device,
+            probability_path=str(prob_path) if prob_path else None,
+            probability_threshold=probability_threshold,
+        )
 
     summary: Dict[str, Any] = {
         "model": model,
@@ -445,6 +743,16 @@ def geoai_semantic_segmentation(
     }
     if prob_path:
         summary["probability_path"] = str(prob_path)
+
+    # Render a PNG overlay the chat UI can display inline
+    overlay_path = out_dir / f"{model}_overlay.png"
+    try:
+        _save_segmentation_overlay(
+            input_path, str(output_path), str(overlay_path), model
+        )
+        summary["overlay_path"] = str(overlay_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Segmentation overlay rendering failed: %s", exc)
 
     summary_path = out_dir / f"{model}_summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
@@ -562,6 +870,18 @@ def geoai_image_similarity(
         np.save(str(sim_npy_path), sim_arr)
         summary["similarities_npy_path"] = str(sim_npy_path)
 
+    # Render a PNG heatmap the chat UI can display inline
+    sim_source = summary.get("output_paths", {}).get("similarity") or ""
+    overlay_path = out_dir / "similarity_overlay.png"
+    try:
+        if sim_source:
+            _save_similarity_overlay(
+                sim_source, str(overlay_path), query_point=(query_x, query_y)
+            )
+            summary["overlay_path"] = str(overlay_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Similarity overlay rendering failed: %s", exc)
+
     summary_path = out_dir / "similarity_summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, default=str)
@@ -640,6 +960,14 @@ def geoai_extract_features(
         "patch_grid": [int(h_patches), int(w_patches)],
         "embed_dim": int(features.shape[-1]) if features.ndim == 3 else None,
     }
+
+    # Render a PCA preview PNG the chat UI can display inline
+    overlay_path = out_dir / "features_overlay.png"
+    try:
+        _save_features_preview(str(features_path), str(overlay_path))
+        summary["overlay_path"] = str(overlay_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Features overlay rendering failed: %s", exc)
 
     summary_path = out_dir / "features_summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
