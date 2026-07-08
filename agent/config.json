@@ -39,6 +39,30 @@
                 "--temp_dir",
                 "tmp/tmp/out"
             ]
+        },
+        "DamageAssessment": {
+            "command": "python",
+            "args": [
+                "tools/DamageAssessment.py",
+                "--temp_dir",
+                "tmp/tmp/out"
+            ]
+        },
+        "FloodSegmentation": {
+            "command": "python",
+            "args": [
+                "tools/FloodSegmentation.py",
+                "--temp_dir",
+                "tmp/tmp/out"
+            ]
+        },
+        "GeoAI": {
+            "command": "python",
+            "args": [
+                "tools/GeoAI.py",
+                "--temp_dir",
+                "tmp/tmp/out"
+            ]
         }
     },
     "models": [

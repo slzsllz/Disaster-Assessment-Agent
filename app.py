@@ -487,14 +487,18 @@ def _tool_trace(response: dict) -> list[dict[str, Any]]:
     return trace
 
 
-def _extract_damage_overlay_paths(response: dict, *texts: str) -> list[str]:
-    """Find generated overlay images in tool outputs / answer text."""
+def _extract_overlay_images(response: dict, *texts: str) -> list[str]:
+    """Find generated overlay/preview images in tool outputs / answer text.
+
+    Matches any ``*_overlay.png`` file (covers damage_overlay.png,
+    flood_overlay.png, and GeoAI tool outputs like car_overlay.png,
+    water_unet_overlay.png, similarity_overlay.png, features_overlay.png).
+    """
     found: list[str] = []
-    overlay_names = ("damage_overlay.png", "flood_overlay.png")
 
     def _add_path(value: str) -> None:
         value = value.strip().strip("`'\" ,.;")
-        if not value.endswith(overlay_names):
+        if not value.endswith("_overlay.png"):
             return
         path = Path(value)
         if not path.is_absolute():
@@ -513,7 +517,7 @@ def _extract_damage_overlay_paths(response: dict, *texts: str) -> list[str]:
             for item in obj:
                 _visit(item)
         elif isinstance(obj, str):
-            for match in re.findall(r"[\w./~:-]*(?:damage|flood)_overlay\.png", obj):
+            for match in re.findall(r"[\w./~:-]*_overlay\.png", obj):
                 _add_path(match)
 
     for msg in response.get("messages", []):
@@ -1072,7 +1076,7 @@ if ran_assistant:
         raw_answer = _last_ai_message(response)
         final_answer = extract_final_answer(raw_answer)
         trace = _tool_trace(response)
-        images = _extract_damage_overlay_paths(response, raw_answer, final_answer)
+        images = _extract_overlay_images(response, raw_answer, final_answer)
         answer_for_display = _sanitize_local_paths_for_display(
             final_answer or raw_answer
         )
