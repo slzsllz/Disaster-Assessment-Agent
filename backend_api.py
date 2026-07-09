@@ -16,6 +16,7 @@ import json
 import os
 import queue
 import re
+import sys
 import threading
 import time
 import traceback
@@ -36,14 +37,15 @@ from agent.error_memory import ErrorMemory
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-CONDA_PREFIX = "/home5/pbz/miniconda3/envs/earthagent_cpython"
-CONDA_BIN = f"{CONDA_PREFIX}/bin"
-CONDA_PYTHON = f"{CONDA_BIN}/python"
-PROJ_DATA_DIR = f"{CONDA_PREFIX}/share/proj"
-GDAL_DATA_DIR = f"{CONDA_PREFIX}/share/gdal"
+CONDA_PREFIX = os.getenv("CONDA_PREFIX") or str(Path(sys.executable).resolve().parents[1])
+CONDA_BIN = os.getenv("CONDA_BIN") or str(Path(CONDA_PREFIX) / "bin")
+CONDA_PYTHON = os.getenv("CONDA_PYTHON") or sys.executable
+PROJ_DATA_DIR = os.getenv("PROJ_DATA") or str(Path(CONDA_PREFIX) / "share" / "proj")
+GDAL_DATA_DIR = os.getenv("GDAL_DATA") or str(Path(CONDA_PREFIX) / "share" / "gdal")
 
-os.environ.setdefault("CONDA_PREFIX", CONDA_PREFIX)
-os.environ["PATH"] = f"{CONDA_BIN}:{os.environ.get('PATH', '')}"
+os.environ["CONDA_PREFIX"] = CONDA_PREFIX
+if CONDA_BIN not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = f"{CONDA_BIN}{os.pathsep}{os.environ.get('PATH', '')}"
 os.environ.setdefault("GTIFF_SRS_SOURCE", "EPSG")
 os.environ.setdefault("GDAL_DATA", GDAL_DATA_DIR)
 os.environ.setdefault("PROJ_DATA", PROJ_DATA_DIR)
@@ -66,7 +68,7 @@ MCP_CHILD_ENV_KEYS = (
     "LC_ALL",
 )
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 # ---------------------------------------------------------------------------
