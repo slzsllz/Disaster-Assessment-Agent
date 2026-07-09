@@ -41,7 +41,7 @@ TEMP_DIR = Path(args.temp_dir or "tmp/tmp/out")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SEN1_ROOT = PROJECT_ROOT / "sen1floods11-segmentation-main"
+SEN1_ROOT = PROJECT_ROOT / "model" / "sen1floods11-segmentation-main"
 DEFAULT_UNET_CHECKPOINT = SEN1_ROOT / "checkpoints" / "unet_flood_best.pt"
 
 VV_MEAN, VV_STD = -10.41, 4.14

@@ -45,7 +45,7 @@ from typing import Any
 # We point PROJ_DATA/PROJ_LIB at the system path so GDAL, rasterio, and
 # the MCP tool subprocesses all agree on one up-to-date database.
 # ---------------------------------------------------------------------------
-_CONDA_PREFIX = "/home2/llz/miniconda3/envs/earthagent_cpython"
+_CONDA_PREFIX = "/home5/pbz/miniconda3/envs/earthagent_cpython"
 _PROJ_DATA_DIR = f"{_CONDA_PREFIX}/share/proj"
 _GDAL_DATA_DIR = f"{_CONDA_PREFIX}/share/gdal"
 
