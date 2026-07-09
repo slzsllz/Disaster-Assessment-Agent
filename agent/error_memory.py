@@ -5,7 +5,10 @@ Cross-task error memory: fixes learned on earlier tasks are reused on later task
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_MEMORY = {
@@ -49,12 +52,16 @@ DEFAULT_MEMORY = {
 
 
 class ErrorMemory:
-    """Small persistent map from error patterns to repair suggestions."""
+    """Small persistent map from error patterns to repair suggestions.
+
+    Dual-write: file (for backward compat) + database (for querying/analytics).
+    """
 
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path else None
         self._memory = dict(DEFAULT_MEMORY)
         self._load()
+        self._sync_from_db()
 
     def _load(self) -> None:
         if self.path is None or not self.path.exists():
@@ -68,14 +75,32 @@ class ErrorMemory:
                 if isinstance(pattern, str) and isinstance(fix, str):
                     self._memory[pattern] = fix
 
+    def _sync_from_db(self) -> None:
+        """从数据库加载错误记忆，合并到内存(DB 优先)"""
+        try:
+            from agent.db import db as database
+            db_errors = database.load_all_errors()
+            if db_errors:
+                self._memory.update(db_errors)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("DB error memory sync skipped: %s", exc)
+
     def save(self) -> None:
-        if self.path is None:
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(self._memory, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        """双写: 文件 + 数据库"""
+        # 文件写入
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(
+                json.dumps(self._memory, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        # 数据库写入
+        try:
+            from agent.db import db as database
+            for pattern, fix in self._memory.items():
+                database.save_error(pattern, fix)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("DB error save skipped: %s", exc)
 
     def lookup(self, error_msg: str) -> str:
         for pattern, fix in self.lookup_all(error_msg, limit=1):
@@ -88,6 +113,12 @@ class ErrorMemory:
         for pattern, fix in self._memory.items():
             if pattern.lower() in text:
                 matches.append((pattern, fix))
+                # 命中计数 +1
+                try:
+                    from agent.db import db as database
+                    database.increment_error_hit(pattern)
+                except Exception:
+                    pass
             if len(matches) >= limit:
                 break
         return matches
@@ -105,7 +136,7 @@ class ErrorMemory:
         if not self._memory:
             return ""
         lines = [
-            "\n\nKnown error memory — when a tool call fails, compare the error "
+            "\n\nKnown error memory - when a tool call fails, compare the error "
             "message with these patterns, apply the suggested fix, and retry "
             "with corrected arguments or a safer workflow before giving up:"
         ]
