@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: disaster_agent_db
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-disaster_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-disaster_agent_pwd}
+      POSTGRES_DB: ${POSTGRES_DB:-disaster_agent}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-disaster_agent} -d ${POSTGRES_DB:-disaster_agent}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # 可选: pgAdmin4 可视化管理
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: disaster_agent_pgadmin
+    restart: unless-stopped
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@disaster-agent.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pg_data:
+  pgadmin_data:

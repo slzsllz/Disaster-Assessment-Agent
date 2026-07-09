@@ -45,13 +45,10 @@ def get_api_credentials(model_name: str) -> Dict[str, str]:
         'openai': 'OPENAI',
         'gpt': 'OPENAI',
         'gpt-5': 'OPENAI',
-        'gpt-4': 'OPENAI',
         'deepseek': 'DEEPSEEK',
         'kimi': 'KIMI',
-        'kimi_k2': 'KIMI',
-        'gemini': 'GEMINI',
         'glm': 'GLM',
-        'glm-4.5': 'GLM',
+        "qwen": "QWEN",
     }
 
     prefix = model_prefix_map.get(model_name.lower(), model_name.upper())
