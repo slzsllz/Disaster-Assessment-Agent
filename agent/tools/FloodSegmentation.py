@@ -242,6 +242,14 @@ def extract_flood_inundation(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
     result["summary_path"] = str(summary_path)
+
+    # Persist to database
+    try:
+        from tools.utils import save_assessment_to_db
+        save_assessment_to_db("flood", result, raster_path=s1_path)
+    except Exception:
+        pass
+
     return result
 
 

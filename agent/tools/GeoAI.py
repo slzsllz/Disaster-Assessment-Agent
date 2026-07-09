@@ -348,10 +348,11 @@ def _read_rgb_for_display(raster_path: str):
 def _save_detection_overlay(
     raster_path: str, geojson_path: str, output_png: str, task: str
 ) -> None:
-    """Overlay detected polygons on the raster and save as PNG."""
+    """Overlay detected objects as bounding boxes on the raster and save as PNG."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
     import geopandas as gpd
     from pathlib import Path
 
@@ -367,14 +368,48 @@ def _save_detection_overlay(
             if len(gdf) > 0:
                 if gdf.crs is not None and crs is not None and gdf.crs != crs:
                     gdf = gdf.to_crs(crs)
-                gdf.plot(
-                    ax=ax, facecolor="none", edgecolor="#ff3030", linewidth=1.0
-                )
+                # Draw a bounding-box rectangle for each detected object
+                bnd = gdf.geometry.bounds
+                img_w = bounds.right - bounds.left
+                lw = max(1.0, img_w / rgb.shape[1] * 1.5)
+                fs = max(5, int(rgb.shape[1] / 80))
+                for _, row in bnd.iterrows():
+                    rect = Rectangle(
+                        (row.minx, row.miny),
+                        row.maxx - row.minx,
+                        row.maxy - row.miny,
+                        linewidth=lw,
+                        edgecolor="#ff2020",
+                        facecolor="none",
+                    )
+                    ax.add_patch(rect)
+                # Annotate confidence scores
+                if "confidence" in gdf.columns:
+                    for (_, br), conf in zip(bnd.iterrows(), gdf["confidence"]):
+                        ax.text(
+                            br.minx, br.maxy, f"{conf:.2f}",
+                            fontsize=fs, color="#ffff00",
+                            fontweight="bold",
+                            va="bottom",
+                            bbox=dict(
+                                boxstyle="round,pad=0.1",
+                                fc="#00000080",
+                                ec="none",
+                            ),
+                        )
         except Exception:
             pass
 
     ax.set_axis_off()
-    ax.set_title(f"{task} detection ({Path(geojson_path).stem})", fontsize=12)
+    n_label = ""
+    try:
+        n_label = f" — {len(gdf)} objects" if Path(geojson_path).exists() else ""
+    except Exception:
+        pass
+    ax.set_title(
+        f"{task} detection{f' ({Path(geojson_path).stem})' if Path(geojson_path).exists() else ''}{n_label}",
+        fontsize=12,
+    )
     plt.tight_layout()
     plt.savefig(output_png, dpi=120, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
@@ -647,6 +682,13 @@ def geoai_object_detection(
         json.dump(summary, f, indent=2, default=str)
     summary["summary_path"] = str(summary_path)
 
+    # Persist to database
+    try:
+        from tools.utils import save_assessment_to_db
+        save_assessment_to_db(task, summary, raster_path=raster_path)
+    except Exception:
+        pass
+
     return summary
 
 
@@ -758,6 +800,13 @@ def geoai_semantic_segmentation(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, default=str)
     summary["summary_path"] = str(summary_path)
+
+    # Persist to database
+    try:
+        from tools.utils import save_assessment_to_db
+        save_assessment_to_db(model, summary, raster_path=input_path)
+    except Exception:
+        pass
 
     return summary
 

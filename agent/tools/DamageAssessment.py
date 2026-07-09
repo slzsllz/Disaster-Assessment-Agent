@@ -244,6 +244,14 @@ def assess_building_damage(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
     result["summary_path"] = str(summary_path)
+
+    # Persist to database
+    try:
+        from tools.utils import save_assessment_to_db
+        save_assessment_to_db("damage", result, raster_path=post_image_path)
+    except Exception:
+        pass
+
     return result
 
 

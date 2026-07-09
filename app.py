@@ -4,10 +4,9 @@ Disaster Detection Agent – Streamlit interaction UI.
 Features
 --------
 1. Pick a model from `agent/config_*.json` (API key / base URL pulled from `.env`).
-2. Load a benchmark question (`benchmark/question.json`) into the chat.
-3. Upload data files; they are made available to the agent via a session
+2. Upload data files; they are made available to the agent via a session
    directory it can call `get_filelist` on.
-4. Run the LangChain ReAct agent (over the existing MCP tools) and show
+3. Run the LangChain ReAct agent (over the existing MCP tools) and show
    only the final analysis / answer in the UI – intermediate tool calls
    are hidden behind a toggle.
 """
@@ -89,6 +88,7 @@ from langchain_core.messages import (  # noqa: E402
     ToolMessage,
 )
 from agent.error_memory import ErrorMemory  # noqa: E402
+from agent.db import db as database  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -97,9 +97,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 os.chdir(PROJECT_ROOT)  # MCP tools resolve relative paths from cwd
 
 AGENT_DIR = PROJECT_ROOT / "agent"
-BENCHMARK_DIR = PROJECT_ROOT / "benchmark"
-QUESTION_FILE = BENCHMARK_DIR / "question.json"
-BENCHMARK_DATA_DIR = BENCHMARK_DIR / "data"
 TEMP_BASE = PROJECT_ROOT / "tmp" / "streamlit_out"
 TEMP_BASE.mkdir(parents=True, exist_ok=True)
 ERROR_MEMORY = ErrorMemory(AGENT_DIR / "error_memory.json")
@@ -246,17 +243,6 @@ def _find_enhanced_system_prompt(model_name: str) -> str | None:
             except Exception:
                 continue
     return None
-
-
-@st.cache_data
-def load_questions() -> dict[str, Any]:
-    return json.loads(QUESTION_FILE.read_text())
-
-
-def _question_summary(qid: str, info: dict[str, Any]) -> str:
-    user_text = (info.get("dialogs") or [{}])[0].get("content", "")
-    short = user_text.splitlines()[0] if user_text else "(no text)"
-    return f"Q{qid} — {short[:70]}"
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +607,11 @@ def _init_state() -> None:
         "pending_question": None,       # question loaded from benchmark, awaiting send
         "pending_assistant": False,     # run the agent after the next rerun
         "last_answer_meta": None,       # info about the last assistant turn
+        "db_session_id": None,          # database session ID for persistence
+        "db_available": database.health_check(),  # whether DB is connected
+        "db_history_rerun": False,      # signal: load a history session on rerun
+        "db_load_session_id": None,     # session ID to load on rerun
+        "db_new_session": False,        # signal: start a new session on rerun
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -973,11 +964,100 @@ show_tool_trace = st.sidebar.checkbox(
 st.session_state["show_tool_trace"] = show_tool_trace
 
 st.sidebar.divider()
-if st.sidebar.button("🗑️ Clear chat history"):
+
+# ---------------------------------------------------------------------------
+# Sidebar – Chat history (new conversation + history list)
+# ---------------------------------------------------------------------------
+if st.sidebar.button("✨ New conversation", use_container_width=True):
     st.session_state.messages = []
     st.session_state.pending_assistant = False
     st.session_state.last_answer_meta = None
+    st.session_state.db_session_id = None
+    st.session_state.db_new_session = True
     st.rerun()
+
+if st.sidebar.button("🗑️ Clear current chat"):
+    st.session_state.messages = []
+    st.session_state.pending_assistant = False
+    st.session_state.last_answer_meta = None
+    if st.session_state.db_session_id:
+        database.delete_session_messages(st.session_state.db_session_id)
+    st.rerun()
+
+# History list
+if st.session_state.db_available:
+    st.sidebar.divider()
+    st.sidebar.subheader("Chat history")
+    history_sessions = database.list_recent_sessions(limit=30)
+    if history_sessions:
+        for hs in history_sessions:
+            sid = str(hs["id"])
+            # Determine display title
+            if hs.get("title"):
+                display_title = hs["title"]
+            elif hs.get("first_message"):
+                display_title = hs["first_message"][:50]
+                if len(hs["first_message"]) > 50:
+                    display_title += "…"
+            else:
+                display_title = "(empty)"
+
+            # Format time
+            updated = hs.get("updated_at")
+            if updated:
+                time_str = updated.strftime("%m-%d %H:%M")
+            else:
+                time_str = "?"
+
+            msg_count = hs.get("message_count", 0)
+            is_active = sid == st.session_state.get("db_session_id")
+
+            # Each history item is a row: title button + delete button
+            col1, col2 = st.sidebar.columns([5, 1])
+            with col1:
+                if st.button(
+                    display_title,
+                    key=f"hist_{sid}",
+                    help=f"{time_str} · {msg_count} msgs · {hs.get('model_name', '?')}",
+                    use_container_width=True,
+                ):
+                    st.session_state.db_load_session_id = sid
+                    st.session_state.db_history_rerun = True
+                    st.rerun()
+            with col2:
+                if st.button("🗑", key=f"del_{sid}", help="Delete"):
+                    database.delete_session(sid)
+                    if sid == st.session_state.get("db_session_id"):
+                        st.session_state.db_session_id = None
+                        st.session_state.messages = []
+                    st.rerun()
+
+            if is_active:
+                st.sidebar.caption(f"▸ {time_str} · {msg_count} msgs (current)")
+    else:
+        st.sidebar.caption("No conversations yet")
+
+# Handle "load history session" signal
+if st.session_state.get("db_history_rerun"):
+    st.session_state.db_history_rerun = False
+    load_sid = st.session_state.db_load_session_id
+    st.session_state.db_load_session_id = None
+    if load_sid:
+        db_msgs = database.get_chat_messages(load_sid)
+        st.session_state.messages = []
+        for m in db_msgs:
+            msg = {
+                "role": m["role"],
+                "content": m.get("content", ""),
+                "display_content": m.get("display_content") or "",
+                "attachments": m.get("attachments") or [],
+                "images": m.get("images") or [],
+            }
+            st.session_state.messages.append(msg)
+        st.session_state.db_session_id = load_sid
+        st.session_state.pending_assistant = False
+        st.session_state.last_answer_meta = None
+        st.rerun()
 
 
 # Build (or rebuild) the agent when the signature changes.
@@ -1015,15 +1095,37 @@ except Exception as exc:  # noqa: BLE001
     st.sidebar.error(f"Failed to initialise agent: {exc}")
     st.stop()
 
+# Create a DB session for persistence (or create new one when requested)
+if st.session_state.get("db_new_session"):
+    st.session_state.db_new_session = False
+    if st.session_state.db_available:
+        st.session_state.db_session_id = database.create_session(
+            model_name=model_name,
+            config_path=selected["path"],
+            system_prompt=system_prompt,
+            title="New conversation",
+        )
+        if not st.session_state.db_session_id:
+            st.session_state.db_available = False
+
+if st.session_state.db_available and not st.session_state.db_session_id:
+    st.session_state.db_session_id = database.create_session(
+        model_name=model_name,
+        config_path=selected["path"],
+        system_prompt=system_prompt,
+        title="New conversation",
+    )
+    if st.session_state.db_session_id:
+        st.sidebar.caption(f"DB session: {st.session_state.db_session_id[:8]}…")
+    else:
+        st.session_state.db_available = False
+elif not st.session_state.db_available:
+    st.sidebar.caption("DB: offline (file-only mode)")
+
 
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
-pending = st.session_state.pop("pending_question", None)
-if pending:
-    st.session_state.messages.append({"role": "user", "content": pending})
-    st.session_state.pending_assistant = True
-
 if st.session_state.messages:
     for m in st.session_state.messages:
         with st.chat_message(m["role"]):
@@ -1041,7 +1143,7 @@ else:
 
 ran_assistant = bool(st.session_state.pending_assistant)
 if ran_assistant:
-    data_roots: list[str] = [str(BENCHMARK_DATA_DIR)]
+    data_roots: list[str] = []
     if st.session_state.uploads_dir:
         data_roots.append(st.session_state.uploads_dir)
     data_roots.append(str(session_temp / "out"))
@@ -1093,6 +1195,17 @@ if ran_assistant:
                 "images": images,
             }
         )
+        # Persist assistant message to database
+        if st.session_state.db_session_id:
+            database.save_chat_message(
+                session_id=st.session_state.db_session_id,
+                role="assistant",
+                content=final_answer or raw_answer,
+                images=images,
+                tool_trace=trace,
+                elapsed_seconds=elapsed,
+                tool_call_count=len(trace),
+            )
         st.session_state.last_answer_meta = {
             "elapsed": elapsed,
             "tool_calls": len(trace),
@@ -1170,5 +1283,20 @@ if chat_value:
             "attachments": attachments,
         }
     )
+    # Persist user message to database
+    if st.session_state.db_session_id:
+        database.save_chat_message(
+            session_id=st.session_state.db_session_id,
+            role="user",
+            content=user_content,
+            display_content=display_content,
+            attachments=attachments,
+        )
+        # Auto-set session title from first user message
+        if len(st.session_state.messages) <= 1 and display_content:
+            title = display_content[:60]
+            if len(display_content) > 60:
+                title += "…"
+            database.rename_session(st.session_state.db_session_id, title)
     st.session_state.pending_assistant = True
     st.rerun()
