@@ -56,6 +56,14 @@
                 "tmp/tmp/out"
             ]
         },
+        "FireBurnedAreaChange": {
+            "command": "python",
+            "args": [
+                "tools/FireBurnedAreaChange.py",
+                "--temp_dir",
+                "tmp/tmp/out"
+            ]
+        },
         "GeoAI": {
             "command": "python",
             "args": [

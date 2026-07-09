@@ -1,7 +1,7 @@
 """GeoAI-based tools for remote sensing object detection, semantic segmentation,
 and image similarity analysis using the geoai library.
 
-Supported models (stored in GeoAIModels/):
+Supported models (stored in model/GeoAIModels/):
   - car_detection_usa.pth            (MaskRCNN, 3-channel, car detection)
   - ship_detection.pth               (MaskRCNN, 3-channel, ship detection)
   - solar_panel_detection.pth        (MaskRCNN, 3-channel, solar panel detection)
@@ -44,7 +44,7 @@ TEMP_DIR = Path(args.temp_dir)
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MODELS_DIR = PROJECT_ROOT / "GeoAIModels"
+MODELS_DIR = PROJECT_ROOT / "model" / "GeoAIModels"
 
 # ---------------------------------------------------------------------------
 # Model registry
@@ -114,7 +114,7 @@ SEGMENTATION_MODELS: Dict[str, Dict[str, Any]] = {
 # ---------------------------------------------------------------------------
 
 def _resolve_model_path(filename: str) -> str:
-    """Return the absolute path to a model file in GeoAIModels/."""
+    """Return the absolute path to a model file in model/GeoAIModels/."""
     path = MODELS_DIR / filename
     if not path.exists():
         raise FileNotFoundError(

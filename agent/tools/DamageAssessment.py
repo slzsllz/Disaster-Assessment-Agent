@@ -44,9 +44,10 @@ TEMP_DIR = Path(args.temp_dir or "tmp/tmp/out")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-XVIEW2_ROOT = PROJECT_ROOT / "Xview2_Strong_Baseline-master" / "Xview2_Strong_Baseline-master"
+XVIEW2_ROOT = PROJECT_ROOT / "model" / "Xview2_Strong_Baseline-master" / "Xview2_Strong_Baseline-master"
 DEFAULT_CHECKPOINT = (
     PROJECT_ROOT
+    / "model"
     / "Xview2_Strong_Baseline-master"
     / "outputs"
     / "checkpoints_long"

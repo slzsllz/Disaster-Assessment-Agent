@@ -3,8 +3,10 @@ benchmark/data/
 evaluate_langchain/
 logs/
 tmp/streamlit_out/
-Xview2_Strong_Baseline-master/
-sen1floods11-segmentation-main/
+tmp/fastapi_out/
+model/Xview2_Strong_Baseline-master/
+model/sen1floods11-segmentation-main/
+model/FLOGA-main/
 tmp/
 
 # Environment variables and secrets
@@ -60,6 +62,7 @@ env/
 Thumbs.db
 
 # Model folder
-Xview2_Strong_Baseline-master/
-sen1floods11-segmentation-main/
-GeoAIModels/
+model/Xview2_Strong_Baseline-master/
+model/sen1floods11-segmentation-main/
+model/FLOGA-main/
+model/GeoAIModels/
