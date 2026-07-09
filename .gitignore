@@ -15,6 +15,7 @@ tmp/
 .env.*.local
 *.key
 *_secrets.json
+zeta-antenna-499906-v7-396e87df49ce.json
 
 # Configuration files with API keys (templates are OK)
 agent/config_*.json

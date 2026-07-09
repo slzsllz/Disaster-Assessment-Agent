@@ -14,10 +14,18 @@ const inputText = ref('')
 const attachments = ref([])
 const messages = ref([])
 const sidebarOpen = ref(true)
+const mapDrawerOpen = ref(false)
 const isSending = ref(false)
 const sessionId = ref(localStorage.getItem('chatDisasterSessionId') || crypto.randomUUID())
 const chatContentRef = ref(null)
 const showScrollBottom = ref(false)
+const amapContainerRef = ref(null)
+const amapMap = ref(null)
+const amapLoading = ref(false)
+const amapError = ref('')
+const mapViewMode = ref('standard')
+const amapKey = import.meta.env.VITE_AMAP_KEY || ''
+const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE || ''
 
 localStorage.setItem('chatDisasterSessionId', sessionId.value)
 
@@ -105,6 +113,87 @@ function renderMarkdown(value) {
 
 function resultImageCaption(index) {
   return index > 0 ? `可视化结果 ${index + 1}` : '可视化结果'
+}
+
+function applyAmapLayer() {
+  if (!amapMap.value || !window.AMap) return
+  const AMap = window.AMap
+  if (mapViewMode.value === 'satellite') {
+    amapMap.value.setLayers([new AMap.TileLayer.Satellite()])
+  } else {
+    amapMap.value.setLayers([new AMap.TileLayer()])
+  }
+}
+
+function setMapViewMode(mode) {
+  mapViewMode.value = mode
+  applyAmapLayer()
+}
+
+function loadAmapScript() {
+  if (window.AMap) return Promise.resolve(window.AMap)
+  if (!amapKey) return Promise.reject(new Error('缺少 VITE_AMAP_KEY，请在前端环境变量中配置高德 Web JS API Key。'))
+
+  if (amapSecurityCode) {
+    window._AMapSecurityConfig = {
+      securityJsCode: amapSecurityCode,
+    }
+  }
+
+  const existingScript = document.querySelector('script[data-amap-sdk="true"]')
+  if (existingScript) {
+    return new Promise((resolve, reject) => {
+      existingScript.addEventListener('load', () => resolve(window.AMap), { once: true })
+      existingScript.addEventListener('error', () => reject(new Error('高德地图 SDK 加载失败。')), {
+        once: true,
+      })
+    })
+  }
+
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script')
+    script.dataset.amapSdk = 'true'
+    script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(amapKey)}&plugin=AMap.Scale,AMap.ToolBar`
+    script.async = true
+    script.onload = () => resolve(window.AMap)
+    script.onerror = () => reject(new Error('高德地图 SDK 加载失败，请检查网络或 Key 配置。'))
+    document.head.appendChild(script)
+  })
+}
+
+async function initAmap() {
+  if (amapMap.value || amapLoading.value) return
+
+  amapLoading.value = true
+  amapError.value = ''
+  try {
+    const AMap = await loadAmapScript()
+    await nextTick()
+    if (!amapContainerRef.value) return
+
+    amapMap.value = new AMap.Map(amapContainerRef.value, {
+      zoom: 4,
+      center: [104.1954, 35.8617],
+      viewMode: '2D',
+      resizeEnable: true,
+    })
+    amapMap.value.addControl(new AMap.Scale())
+    amapMap.value.addControl(new AMap.ToolBar({ position: 'RB' }))
+    applyAmapLayer()
+  } catch (error) {
+    amapError.value = error.message || String(error)
+  } finally {
+    amapLoading.value = false
+  }
+}
+
+async function openMapDrawer() {
+  mapDrawerOpen.value = true
+  await nextTick()
+  await initAmap()
+  nextTick(() => {
+    amapMap.value?.resize()
+  })
 }
 
 function handleFiles(event) {
@@ -365,7 +454,41 @@ async function clearHistory() {
       </section>
 
       <button class="clear-button" type="button" @click="clearHistory">Clear chat history</button>
-      <p class="ready-text">Ready · 2 tools loaded</p>
+    </aside>
+
+    <aside class="map-drawer" :class="{ open: mapDrawerOpen }">
+      <header class="map-drawer-header">
+        <div>
+          <h2>地图</h2>
+        </div>
+        <div class="map-layer-toggle" role="group" aria-label="Map layer">
+          <button
+            type="button"
+            :class="{ active: mapViewMode === 'standard' }"
+            @click="setMapViewMode('standard')"
+          >
+            标准
+          </button>
+          <button
+            type="button"
+            :class="{ active: mapViewMode === 'satellite' }"
+            @click="setMapViewMode('satellite')"
+          >
+            卫星
+          </button>
+        </div>
+        <button class="map-close-button" type="button" @click="mapDrawerOpen = false">×</button>
+      </header>
+
+      <div class="map-panel">
+        <div v-if="amapLoading" class="map-state">Loading AMap...</div>
+        <div v-else-if="amapError" class="map-state error">{{ amapError }}</div>
+        <div v-show="!amapLoading && !amapError" ref="amapContainerRef" class="amap-container" />
+      </div>
+
+      <footer class="map-drawer-footer">
+        <span>Disaster Detection Agent</span>
+      </footer>
     </aside>
 
     <section class="chat-pane">
@@ -376,7 +499,17 @@ async function clearHistory() {
           <h1>哈哈哈哈哈哈哈哈哈哈哈哈哈哈</h1>
           <p>占位 占位 占位 占位 占位 占位 占位 占位 占位</p>
         </div>
-        <span class="header-status">{{ isSending ? 'Analyzing' : 'Ready' }}</span>
+        <div class="header-actions">
+          <span class="header-status">{{ isSending ? 'Analyzing' : 'Ready' }}</span>
+          <button
+            class="map-toggle"
+            type="button"
+            :aria-label="mapDrawerOpen ? 'Hide map' : 'Show map'"
+            @click="mapDrawerOpen ? (mapDrawerOpen = false) : openMapDrawer()"
+          >
+            {{ mapDrawerOpen ? 'Hide map' : 'Map' }}
+          </button>
+        </div>
       </header>
 
       <div ref="chatContentRef" class="chat-content" @scroll="updateScrollBottomButton">
