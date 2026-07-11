@@ -140,21 +140,41 @@ class Database:
     # ==================================================================
     def create_session(
         self,
+        session_id: str = None,
         model_name: str = "",
         config_path: str = "",
         system_prompt: str = "",
         title: str = "",
     ) -> Optional[str]:
-        """创建会话，返回 session_id (UUID)"""
+        """创建(或刷新)会话，返回 session_id (UUID)
+
+        传入 session_id 时以其作主键做 upsert, 便于与前端生成的 sessionId
+        对齐; 不传时由数据库 gen_random_uuid() 生成。已存在则刷新元数据。
+        """
         if not self._ensure_pool():
             return None
         try:
             with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    """INSERT INTO sessions (title, model_name, config_path, system_prompt)
-                       VALUES (%s, %s, %s, %s) RETURNING id""",
-                    (title or None, model_name, config_path, system_prompt),
-                )
+                if session_id:
+                    cur.execute(
+                        """INSERT INTO sessions
+                           (id, title, model_name, config_path, system_prompt)
+                           VALUES (%s, %s, %s, %s, %s)
+                           ON CONFLICT (id) DO UPDATE
+                           SET system_prompt = EXCLUDED.system_prompt,
+                               model_name    = EXCLUDED.model_name,
+                               config_path   = EXCLUDED.config_path,
+                               title         = COALESCE(sessions.title, EXCLUDED.title),
+                               updated_at    = now()
+                           RETURNING id""",
+                        (session_id, title or None, model_name, config_path, system_prompt),
+                    )
+                else:
+                    cur.execute(
+                        """INSERT INTO sessions (title, model_name, config_path, system_prompt)
+                           VALUES (%s, %s, %s, %s) RETURNING id""",
+                        (title or None, model_name, config_path, system_prompt),
+                    )
                 row = cur.fetchone()
                 conn.commit()
                 return str(row["id"]) if row else None
@@ -349,12 +369,15 @@ class Database:
             return None
         try:
             with self._conn() as conn, conn.cursor() as cur:
+                # geom 先写 NULL, 拿到 id 后用参数化语句单独写入,
+                # 避免把字面字符串 "ST_GeomFromGeoJSON('...')" 当作 geometry
+                # 值插入而触发类型转换错误。
                 cur.execute(
                     """INSERT INTO assessment_results
                        (session_id, task, description, raster_path, geojson_path,
                         overlay_path, summary_path, summary, geom, model_file,
                         num_objects)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, %s)
                        RETURNING id""",
                     (
                         session_id,
@@ -365,21 +388,26 @@ class Database:
                         summary.get("overlay_path"),
                         summary.get("summary_path"),
                         Jsonb(summary),
-                        f"ST_GeomFromGeoJSON('{geom_geojson}')" if geom_geojson else None,
                         summary.get("model_file"),
                         summary.get("num_objects"),
                     ),
                 )
-                # 如果有空间数据，用参数化方式设置 geom
-                if geom_geojson:
-                    cur.execute(
-                        """UPDATE assessment_results SET geom = ST_GeomFromGeoJSON(%s)
-                           WHERE id = (SELECT currval('assessment_results_id_seq'))""",
-                        (geom_geojson,),
-                    )
                 row = cur.fetchone()
+                if row is None:
+                    conn.commit()
+                    return None
+                assessment_id = row[0]
+                if geom_geojson:
+                    # 注意: 此处直接按 SRID=4326 存储. 若栅格位于投影坐标系,
+                    # bbox 坐标并非经纬度, 会有空间偏差 (已知限制, 暂不重投影)。
+                    cur.execute(
+                        """UPDATE assessment_results
+                           SET geom = ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
+                           WHERE id = %s""",
+                        (geom_geojson, assessment_id),
+                    )
                 conn.commit()
-                return row[0] if row else None
+                return assessment_id
         except Exception as exc:  # noqa: BLE001
             logger.warning("save_assessment failed: %s", exc)
             return None

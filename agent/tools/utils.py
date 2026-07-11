@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import numpy as np
 from osgeo import gdal
 
@@ -97,15 +98,17 @@ def save_assessment_to_db(
         task: 任务类型 (building/flood/car/ship/damage/solar_panel/wetland/water_unet)
         summary: 工具返回的 summary dict
         raster_path: 输入栅格路径(用于提取空间范围)
-        session_id: 关联的会话 ID
+        session_id: 关联的会话 ID (未传则从 DISASTER_SESSION_ID 环境变量读取,
+            该变量由 backend_api.py 在启动 MCP 工具子进程时注入)
     """
     try:
         from agent.db import db as database
+        sid = session_id or os.getenv("DISASTER_SESSION_ID", "")
         geom_json = _extract_bbox_geojson(raster_path or summary.get("raster_path", ""))
         database.save_assessment(
             task=task,
             summary=summary,
-            session_id=session_id or None,
+            session_id=sid or None,
             description=summary.get("description", summary.get("task", "")),
             geom_geojson=geom_json,
         )
