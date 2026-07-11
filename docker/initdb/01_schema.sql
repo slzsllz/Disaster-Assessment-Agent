@@ -46,7 +46,10 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     tool_trace       JSONB,
     elapsed_seconds  DOUBLE PRECISION,
     tool_call_count  INTEGER,
-    created_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    -- 二进制文件存储 (用户上传和模型输出)
+    attachment_files JSONB,  -- [{name, mime_type, data_base64}]
+    image_files      JSONB   -- [{name, mime_type, data_base64}]
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
     ON chat_messages (session_id, created_at);
@@ -70,7 +73,12 @@ CREATE TABLE IF NOT EXISTS assessment_results (
     geom         geometry(Polygon, 4326),
     model_file   TEXT,
     num_objects  INTEGER,
-    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    -- 二进制文件存储 (模型输出的栅格、矢量、叠加图等)
+    raster_file  BYTEA,
+    geojson_file BYTEA,
+    overlay_file BYTEA,
+    summary_file BYTEA
 );
 CREATE INDEX IF NOT EXISTS idx_assessment_task       ON assessment_results (task);
 CREATE INDEX IF NOT EXISTS idx_assessment_session    ON assessment_results (session_id);

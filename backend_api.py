@@ -488,19 +488,68 @@ def _image_descriptor(path: str) -> dict[str, str]:
 
 def _serialize_message(row: dict) -> dict[str, Any]:
     images: list[dict[str, str]] = []
-    for img in row.get("images") or []:
-        if not isinstance(img, dict):
+
+    # 优先从二进制字段读取图片
+    image_files = row.get("image_files") or []
+    for img_file in image_files:
+        if not isinstance(img_file, dict):
             continue
-        path = img.get("path")
-        if path and Path(path).exists():
-            images.append(file_payload(path))  # fresh /api/files/{id} url
-        elif img.get("url"):
-            images.append({"name": img.get("name", "image"), "url": img["url"]})
+        name = img_file.get("name", "image")
+        mime_type = img_file.get("mime_type", "image/png")
+        data_b64 = img_file.get("data_base64")
+        if data_b64:
+            # 生成一个临时 file_id 用于访问
+            file_id = uuid.uuid4().hex
+            # 将 base64 解码并写入临时文件
+            import base64
+            data = base64.b64decode(data_b64)
+            temp_path = TEMP_BASE / f"{file_id}_{name}"
+            temp_path.write_bytes(data)
+            FILES[file_id] = temp_path
+            images.append({"name": name, "url": f"/api/files/{file_id}"})
+
+    # 如果二进制字段为空，回退到路径方式
+    if not images:
+        for img in row.get("images") or []:
+            if not isinstance(img, dict):
+                continue
+            path = img.get("path")
+            if path and Path(path).exists():
+                images.append(file_payload(path))
+            elif img.get("url"):
+                images.append({"name": img.get("name", "image"), "url": img["url"]})
+
+    # 处理附件文件（从二进制字段）
+    attachments = []
+    attachment_files = row.get("attachment_files") or []
+    for att_file in attachment_files:
+        if not isinstance(att_file, dict):
+            continue
+        name = att_file.get("name", "file")
+        mime_type = att_file.get("mime_type", "application/octet-stream")
+        data_b64 = att_file.get("data_base64")
+        if data_b64:
+            file_id = uuid.uuid4().hex
+            import base64
+            data = base64.b64decode(data_b64)
+            temp_path = TEMP_BASE / f"{file_id}_{name}"
+            temp_path.write_bytes(data)
+            FILES[file_id] = temp_path
+            attachments.append({
+                "name": name,
+                "url": f"/api/files/{file_id}",
+                "mime_type": mime_type,
+            })
+
+    # 如果附件二进制为空，回退到路径方式
+    if not attachments:
+        attachments = row.get("attachments") or []
+
     return {
         "id": row["id"],
         "role": row["role"],
         "content": row.get("display_content") or row.get("content") or "",
-        "attachments": row.get("attachments") or [],
+        "attachments": attachments,
         "images": images,
         "tool_trace": row.get("tool_trace") or [],
         "elapsed_seconds": row.get("elapsed_seconds"),
@@ -587,6 +636,16 @@ def clear_session(session_id: str) -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str) -> dict[str, bool]:
+    """删除整个会话及其所有消息"""
+    success = db.delete_session(session_id)
+    # 清理内存中的会话缓存
+    with SESSIONS_LOCK:
+        SESSIONS.pop(session_id, None)
+    return {"ok": success}
+
+
 @app.get("/api/files/{file_id}")
 def get_file(file_id: str) -> FileResponse:
     path = FILES.get(file_id)
@@ -610,14 +669,24 @@ def chat(
         try:
             session.uploads_dir.mkdir(parents=True, exist_ok=True)
             uploaded_paths: list[str] = []
+            attachment_files: list[dict] = []
             for upload in files or []:
                 if not upload.filename:
                     continue
                 safe_name = Path(upload.filename).name
                 save_path = session.uploads_dir / safe_name
+                file_data = upload.file.read()
                 with open(save_path, "wb") as out:
-                    out.write(upload.file.read())
+                    out.write(file_data)
                 uploaded_paths.append(str(save_path))
+
+                # 读取文件二进制数据用于数据库存储
+                import base64
+                attachment_files.append({
+                    "name": safe_name,
+                    "mime_type": upload.content_type or "application/octet-stream",
+                    "data_base64": base64.b64encode(file_data).decode("utf-8"),
+                })
 
             content_parts = [message.strip()] if message.strip() else []
             if uploaded_paths:
@@ -640,6 +709,7 @@ def chat(
                 "user",
                 content=user_content,
                 attachments=[{"name": Path(p).name, "path": p} for p in uploaded_paths],
+                attachment_files=attachment_files,
             )
 
             if session.handle is None:
@@ -667,6 +737,20 @@ def chat(
             session.messages.append(
                 {"role": "assistant", "content": final_answer or raw_answer}
             )
+            # 读取输出图片的二进制数据
+            image_files: list[dict] = []
+            for img_path in images:
+                try:
+                    img_data = Path(img_path).read_bytes()
+                    import base64
+                    image_files.append({
+                        "name": Path(img_path).name,
+                        "mime_type": "image/png",
+                        "data_base64": base64.b64encode(img_data).decode("utf-8"),
+                    })
+                except Exception:
+                    pass
+
             db.save_chat_message(
                 session_id,
                 "assistant",
@@ -676,6 +760,7 @@ def chat(
                 tool_trace=trace,
                 elapsed_seconds=elapsed,
                 tool_call_count=len(trace),
+                image_files=image_files,
             )
 
             return {
@@ -716,14 +801,24 @@ def chat_stream(
     try:
         session.uploads_dir.mkdir(parents=True, exist_ok=True)
         uploaded_paths: list[str] = []
+        attachment_files: list[dict] = []
         for upload in files or []:
             if not upload.filename:
                 continue
             safe_name = Path(upload.filename).name
             save_path = session.uploads_dir / safe_name
+            file_data = upload.file.read()
             with open(save_path, "wb") as out:
-                out.write(upload.file.read())
+                out.write(file_data)
             uploaded_paths.append(str(save_path))
+
+            # 读取文件二进制数据用于数据库存储
+            import base64
+            attachment_files.append({
+                "name": safe_name,
+                "mime_type": upload.content_type or "application/octet-stream",
+                "data_base64": base64.b64encode(file_data).decode("utf-8"),
+            })
 
         content_parts = [message.strip()] if message.strip() else []
         if uploaded_paths:
@@ -746,6 +841,7 @@ def chat_stream(
             "user",
             content=user_content,
             attachments=[{"name": Path(p).name, "path": p} for p in uploaded_paths],
+            attachment_files=attachment_files,
         )
 
         if session.handle is None:
@@ -792,6 +888,20 @@ def chat_stream(
                     session.messages.append(
                         {"role": "assistant", "content": final_answer or raw_answer or streamed_text}
                     )
+                    # 读取输出图片的二进制数据
+                    image_files: list[dict] = []
+                    for img_path in images:
+                        try:
+                            img_data = Path(img_path).read_bytes()
+                            import base64
+                            image_files.append({
+                                "name": Path(img_path).name,
+                                "mime_type": "image/png",
+                                "data_base64": base64.b64encode(img_data).decode("utf-8"),
+                            })
+                        except Exception:
+                            pass
+
                     db.save_chat_message(
                         session_id,
                         "assistant",
@@ -801,6 +911,7 @@ def chat_stream(
                         tool_trace=trace,
                         elapsed_seconds=elapsed,
                         tool_call_count=len(trace),
+                        image_files=image_files,
                     )
 
                     yield sse_event(

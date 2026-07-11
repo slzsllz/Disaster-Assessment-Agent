@@ -44,6 +44,15 @@ const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE || ''
 localStorage.setItem('chatDisasterSessionId', sessionId.value)
 
 const hasMessages = computed(() => messages.value.length > 0)
+
+// 按更新时间排序（从新到旧）
+const sortedConversationHistory = computed(() => {
+  return [...conversationHistory.value].sort((a, b) => {
+    const timeA = a.updatedAt || 0
+    const timeB = b.updatedAt || 0
+    return timeB - timeA // 降序：最新的在前
+  })
+})
 const previewableImageTypes = new Set([
   'image/png',
   'image/jpeg',
@@ -270,6 +279,28 @@ async function openConversation(conversation) {
   }
   showScrollBottom.value = false
   scrollToBottom()
+}
+
+async function deleteConversation(conversation) {
+  if (!confirm(`确定要删除对话"${conversation.title}"吗？`)) return
+
+  try {
+    const res = await fetch(`/api/sessions/${conversation.id}`, { method: 'DELETE' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  } catch (err) {
+    console.error('删除对话失败:', err)
+    alert('删除失败，请重试')
+    return
+  }
+
+  // 从本地列表中移除
+  conversationHistory.value = conversationHistory.value.filter(c => c.id !== conversation.id)
+  saveConversationHistory()
+
+  // 如果删除的是当前对话，开启新对话
+  if (conversation.id === sessionId.value) {
+    startNewConversation()
+  }
 }
 
 function applyAmapLayer() {
@@ -616,16 +647,28 @@ onMounted(async () => {
       <section class="history-section">
         <h2>历史对话</h2>
         <div v-if="conversationHistory.length" class="history-list">
-          <button
-            v-for="conversation in conversationHistory"
+          <div
+            v-for="conversation in sortedConversationHistory"
             :key="conversation.id"
             class="history-item"
             :class="{ active: conversation.id === sessionId }"
-            type="button"
-            @click="openConversation(conversation)"
           >
-            {{ conversation.title }}
-          </button>
+            <button
+              class="history-item-content"
+              type="button"
+              @click="openConversation(conversation)"
+            >
+              {{ conversation.title }}
+            </button>
+            <button
+              class="history-delete-btn"
+              type="button"
+              title="删除此对话"
+              @click.stop="deleteConversation(conversation)"
+            >
+              ×
+            </button>
+          </div>
         </div>
         <p v-else class="empty-history">暂无历史对话</p>
       </section>
