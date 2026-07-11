@@ -16,21 +16,9 @@ const attachments = ref([])
 const sidebarOpen = ref(true)
 const mapDrawerOpen = ref(false)
 const isSending = ref(false)
-const HISTORY_KEY = 'chatDisasterConversations'
-
-function loadConversationHistory() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]')
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
-}
-
-const conversationHistory = ref(loadConversationHistory())
-const sessionId = ref(localStorage.getItem('chatDisasterSessionId') || crypto.randomUUID())
-const savedConversation = conversationHistory.value.find((item) => item.id === sessionId.value)
-const messages = ref(savedConversation?.messages || [])
+const conversationHistory = ref([])
+const sessionId = ref(crypto.randomUUID())
+const messages = ref([])
 const chatContentRef = ref(null)
 const showScrollBottom = ref(false)
 const amapContainerRef = ref(null)
@@ -40,8 +28,6 @@ const amapError = ref('')
 const mapViewMode = ref('standard')
 const amapKey = import.meta.env.VITE_AMAP_KEY || ''
 const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE || ''
-
-localStorage.setItem('chatDisasterSessionId', sessionId.value)
 
 const hasMessages = computed(() => messages.value.length > 0)
 
@@ -138,37 +124,9 @@ function resultImageCaption(index) {
   return index > 0 ? `可视化结果 ${index + 1}` : '可视化结果'
 }
 
-function conversationTitle(items = messages.value) {
-  const firstUserMessage = items.find((item) => item.role === 'user')?.content || '新对话'
-  const title = firstUserMessage.replace(/\s+/g, ' ').trim() || '新对话'
-  return title.length > 24 ? `${title.slice(0, 24)}...` : title
-}
-
-function sanitizeMessageForHistory(message) {
-  return {
-    id: message.id,
-    role: message.role,
-    content: message.content,
-    meta: message.meta || '',
-    error: message.error || '',
-    images: message.images || [],
-    attachments: (message.attachments || []).map((file) => ({
-      id: file.id,
-      name: file.name,
-      size: file.size,
-      type: file.type,
-      preview: '',
-    })),
-  }
-}
-
-function saveConversationHistory() {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(conversationHistory.value))
-}
-
 // ---------------------------------------------------------------------------
 // 后端数据加载 -- 会话历史与消息从数据库读取 (DB -> API -> 前端)
-// 失败时静默回退到 localStorage, 不阻断本地使用。
+// 失败时不使用浏览器本地缓存，历史对话只以数据库为准。
 // ---------------------------------------------------------------------------
 function mapApiMessage(m) {
   const metaParts = []
@@ -206,14 +164,9 @@ async function fetchSessions() {
     const res = await fetch('/api/sessions')
     if (!res.ok) return
     const data = await res.json()
-    const apiSessions = (data.sessions || []).map(mapApiSession)
-    const apiIds = new Set(apiSessions.map((s) => s.id))
-    // 保留 localStorage 中 DB 尚未收录的会话 (离线/旧数据)
-    const localOnly = conversationHistory.value.filter((c) => !apiIds.has(c.id))
-    conversationHistory.value = [...apiSessions, ...localOnly].slice(0, 30)
-    saveConversationHistory()
+    conversationHistory.value = (data.sessions || []).map(mapApiSession).slice(0, 30)
   } catch {
-    // DB 不可用, 保持 localStorage 历史
+    conversationHistory.value = []
   }
 }
 
@@ -228,22 +181,6 @@ async function fetchMessages(id) {
   }
 }
 
-function upsertCurrentConversation() {
-  if (!messages.value.length) return
-
-  const item = {
-    id: sessionId.value,
-    title: conversationTitle(),
-    updatedAt: Date.now(),
-    messages: messages.value.map(sanitizeMessageForHistory),
-  }
-  conversationHistory.value = [
-    item,
-    ...conversationHistory.value.filter((historyItem) => historyItem.id !== item.id),
-  ].slice(0, 30)
-  saveConversationHistory()
-}
-
 function releasePendingFiles() {
   attachments.value.forEach((item) => {
     if (item.preview) URL.revokeObjectURL(item.preview)
@@ -252,30 +189,20 @@ function releasePendingFiles() {
 }
 
 function startNewConversation() {
-  upsertCurrentConversation()
   releasePendingFiles()
   messages.value = []
   showScrollBottom.value = false
   sessionId.value = crypto.randomUUID()
-  localStorage.setItem('chatDisasterSessionId', sessionId.value)
 }
 
 async function openConversation(conversation) {
   if (conversation.id === sessionId.value) return
-  upsertCurrentConversation()
   releasePendingFiles()
   sessionId.value = conversation.id
-  localStorage.setItem('chatDisasterSessionId', sessionId.value)
-  // 优先用内存缓存的消息; 否则从后端 (DB) 拉取
-  if (conversation.messages && conversation.messages.length) {
-    messages.value = conversation.messages
-  } else {
-    messages.value = []
-    const fetched = await fetchMessages(conversation.id)
-    if (fetched && fetched.length) {
-      messages.value = fetched
-      conversation.messages = fetched
-    }
+  messages.value = []
+  const fetched = await fetchMessages(conversation.id)
+  if (fetched && fetched.length) {
+    messages.value = fetched
   }
   showScrollBottom.value = false
   scrollToBottom()
@@ -293,14 +220,11 @@ async function deleteConversation(conversation) {
     return
   }
 
-  // 从本地列表中移除
-  conversationHistory.value = conversationHistory.value.filter(c => c.id !== conversation.id)
-  saveConversationHistory()
-
   // 如果删除的是当前对话，开启新对话
   if (conversation.id === sessionId.value) {
     startNewConversation()
   }
+  await fetchSessions()
 }
 
 function applyAmapLayer() {
@@ -572,22 +496,12 @@ async function sendMessage() {
     scrollToBottom()
   } finally {
     isSending.value = false
-    upsertCurrentConversation()
+    await fetchSessions()
   }
 }
 
 onMounted(async () => {
-  // 当前会话若内存无消息 (如新浏览器/刷新), 从后端 DB 加载
-  if (!messages.value.length) {
-    const fetched = await fetchMessages(sessionId.value)
-    if (fetched && fetched.length) {
-      messages.value = fetched
-      const saved = conversationHistory.value.find((c) => c.id === sessionId.value)
-      if (saved) saved.messages = fetched
-      scrollToBottom()
-    }
-  }
-  // 用 DB 会话刷新历史侧栏 (DB 不可用时回退 localStorage)
+  // 用数据库会话刷新历史侧栏。
   await fetchSessions()
 })
 
