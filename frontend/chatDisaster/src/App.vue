@@ -1,9 +1,10 @@
 <script setup>
-import { Bottom, Document, Plus, Top } from '@element-plus/icons-vue'
+import { Bottom, Document, Edit, Plus, Top } from '@element-plus/icons-vue'
+import { ElSlider } from 'element-plus'
+import 'element-plus/es/components/slider/style/css'
 import { computed, nextTick, ref } from 'vue'
 import logoUrl from './assets/szu-logo.png'
 
-const promptMode = ref('default')
 const systemPrompt = ref(
   "You are a geoscientist, and you need to use tools to answer Earth observation questions. Carefully reason about which tools to use and in what order. When a tool returns 'Result saved at /path/to/file', you MUST use that full path in all subsequent tool calls. Finish your final response with a clearly labelled answer block."
 )
@@ -12,11 +13,24 @@ const maxExecutionTime = ref(600)
 const showTrace = ref(false)
 const inputText = ref('')
 const attachments = ref([])
-const messages = ref([])
 const sidebarOpen = ref(true)
 const mapDrawerOpen = ref(false)
 const isSending = ref(false)
+const HISTORY_KEY = 'chatDisasterConversations'
+
+function loadConversationHistory() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]')
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+const conversationHistory = ref(loadConversationHistory())
 const sessionId = ref(localStorage.getItem('chatDisasterSessionId') || crypto.randomUUID())
+const savedConversation = conversationHistory.value.find((item) => item.id === sessionId.value)
+const messages = ref(savedConversation?.messages || [])
 const chatContentRef = ref(null)
 const showScrollBottom = ref(false)
 const amapContainerRef = ref(null)
@@ -113,6 +127,77 @@ function renderMarkdown(value) {
 
 function resultImageCaption(index) {
   return index > 0 ? `可视化结果 ${index + 1}` : '可视化结果'
+}
+
+function conversationTitle(items = messages.value) {
+  const firstUserMessage = items.find((item) => item.role === 'user')?.content || '新对话'
+  const title = firstUserMessage.replace(/\s+/g, ' ').trim() || '新对话'
+  return title.length > 24 ? `${title.slice(0, 24)}...` : title
+}
+
+function sanitizeMessageForHistory(message) {
+  return {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    meta: message.meta || '',
+    error: message.error || '',
+    images: message.images || [],
+    attachments: (message.attachments || []).map((file) => ({
+      id: file.id,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      preview: '',
+    })),
+  }
+}
+
+function saveConversationHistory() {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(conversationHistory.value))
+}
+
+function upsertCurrentConversation() {
+  if (!messages.value.length) return
+
+  const item = {
+    id: sessionId.value,
+    title: conversationTitle(),
+    updatedAt: Date.now(),
+    messages: messages.value.map(sanitizeMessageForHistory),
+  }
+  conversationHistory.value = [
+    item,
+    ...conversationHistory.value.filter((historyItem) => historyItem.id !== item.id),
+  ].slice(0, 30)
+  saveConversationHistory()
+}
+
+function releasePendingFiles() {
+  attachments.value.forEach((item) => {
+    if (item.preview) URL.revokeObjectURL(item.preview)
+  })
+  attachments.value = []
+}
+
+function startNewConversation() {
+  upsertCurrentConversation()
+  releasePendingFiles()
+  messages.value = []
+  showScrollBottom.value = false
+  sessionId.value = crypto.randomUUID()
+  localStorage.setItem('chatDisasterSessionId', sessionId.value)
+}
+
+function openConversation(conversation) {
+  if (conversation.id === sessionId.value) return
+  upsertCurrentConversation()
+  releasePendingFiles()
+  sessionId.value = conversation.id
+  localStorage.setItem('chatDisasterSessionId', sessionId.value)
+  messages.value = conversation.messages || []
+  showScrollBottom.value = false
+  scrollToBottom()
 }
 
 function applyAmapLayer() {
@@ -384,22 +469,10 @@ async function sendMessage() {
     scrollToBottom()
   } finally {
     isSending.value = false
+    upsertCurrentConversation()
   }
 }
 
-async function clearHistory() {
-  messages.value = []
-  showScrollBottom.value = false
-  attachments.value.forEach((item) => {
-    if (item.preview) URL.revokeObjectURL(item.preview)
-  })
-  attachments.value = []
-  try {
-    await fetch(`/api/sessions/${sessionId.value}/clear`, { method: 'POST' })
-  } catch {
-    // UI state is already cleared; backend can be reset on next refresh if needed.
-  }
-}
 </script>
 
 <template>
@@ -417,35 +490,30 @@ async function clearHistory() {
       <div class="sidebar-title">Disaster Detection Agent</div>
 
       <section class="sidebar-section">
-        <label class="section-label">System prompt</label>
-        <label class="radio-row">
-          <input v-model="promptMode" value="default" type="radio" />
-          <span>Default (concise)</span>
-        </label>
-        <label class="radio-row">
-          <input v-model="promptMode" value="custom" type="radio" />
-          <span>Custom</span>
-        </label>
-      </section>
-
-      <section class="sidebar-section">
-        <label class="section-label" for="system-prompt">System prompt</label>
-        <textarea id="system-prompt" v-model="systemPrompt" class="system-textarea" />
-      </section>
-
-      <section class="sidebar-section">
         <h2>Advanced</h2>
         <label class="slider-label">
           <span>Recursion limit</span>
           <strong>{{ recursionLimit }}</strong>
         </label>
-        <input v-model="recursionLimit" type="range" min="10" max="100" step="5" />
+        <el-slider
+          v-model="recursionLimit"
+          :min="10"
+          :max="100"
+          :step="1"
+          size="small"
+        />
 
         <label class="slider-label">
           <span>Max execution time (s)</span>
           <strong>{{ maxExecutionTime }}</strong>
         </label>
-        <input v-model="maxExecutionTime" type="range" min="60" max="1800" step="60" />
+        <el-slider
+          v-model="maxExecutionTime"
+          :min="60"
+          :max="1800"
+          :step="1"
+          size="small"
+        />
 
         <label class="checkbox-row">
           <input v-model="showTrace" type="checkbox" />
@@ -453,7 +521,27 @@ async function clearHistory() {
         </label>
       </section>
 
-      <button class="clear-button" type="button" @click="clearHistory">Clear chat history</button>
+      <button class="new-chat-button" type="button" @click="startNewConversation">
+        <Edit />
+        <span>创建新对话</span>
+      </button>
+
+      <section class="history-section">
+        <h2>历史对话</h2>
+        <div v-if="conversationHistory.length" class="history-list">
+          <button
+            v-for="conversation in conversationHistory"
+            :key="conversation.id"
+            class="history-item"
+            :class="{ active: conversation.id === sessionId }"
+            type="button"
+            @click="openConversation(conversation)"
+          >
+            {{ conversation.title }}
+          </button>
+        </div>
+        <p v-else class="empty-history">暂无历史对话</p>
+      </section>
     </aside>
 
     <aside class="map-drawer" :class="{ open: mapDrawerOpen }">
