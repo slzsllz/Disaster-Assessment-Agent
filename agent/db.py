@@ -16,6 +16,7 @@ import atexit
 import logging
 import os
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -256,6 +257,16 @@ class Database:
     # ==================================================================
     # 2. Chat Messages
     # ==================================================================
+    def _read_file_as_binary(self, file_path: str) -> Optional[bytes]:
+        """读取文件为二进制数据"""
+        try:
+            path = Path(file_path)
+            if path.exists() and path.is_file():
+                return path.read_bytes()
+        except Exception as exc:
+            logger.debug("Failed to read file %s: %s", file_path, exc)
+        return None
+
     def save_chat_message(
         self,
         session_id: str,
@@ -267,8 +278,15 @@ class Database:
         tool_trace: list = None,
         elapsed_seconds: float = None,
         tool_call_count: int = None,
+        attachment_files: list = None,
+        image_files: list = None,
     ) -> Optional[int]:
-        """保存一条聊天消息，返回消息 ID"""
+        """保存一条聊天消息，返回消息 ID
+
+        Args:
+            attachment_files: 用户上传的附件文件二进制数据列表 [{name, mime_type, data}]
+            image_files: 模型输出的图片二进制数据列表 [{name, mime_type, data}]
+        """
         if not self._ensure_pool():
             return None
         try:
@@ -276,8 +294,9 @@ class Database:
                 cur.execute(
                     """INSERT INTO chat_messages
                        (session_id, role, content, display_content, attachments,
-                        images, tool_trace, elapsed_seconds, tool_call_count)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        images, tool_trace, elapsed_seconds, tool_call_count,
+                        attachment_files, image_files)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        RETURNING id""",
                     (
                         session_id,
@@ -289,6 +308,8 @@ class Database:
                         Jsonb(tool_trace) if tool_trace else None,
                         elapsed_seconds,
                         tool_call_count,
+                        Jsonb(attachment_files) if attachment_files else None,
+                        Jsonb(image_files) if image_files else None,
                     ),
                 )
                 row = cur.fetchone()
@@ -368,16 +389,20 @@ class Database:
         if not self._ensure_pool():
             return None
         try:
+            # 读取文件二进制数据
+            raster_file = self._read_file_as_binary(summary.get("raster_path", ""))
+            geojson_file = self._read_file_as_binary(summary.get("geojson_path", ""))
+            overlay_file = self._read_file_as_binary(summary.get("overlay_path", ""))
+            summary_file = self._read_file_as_binary(summary.get("summary_path", ""))
+
             with self._conn() as conn, conn.cursor() as cur:
-                # geom 先写 NULL, 拿到 id 后用参数化语句单独写入,
-                # 避免把字面字符串 "ST_GeomFromGeoJSON('...')" 当作 geometry
-                # 值插入而触发类型转换错误。
                 cur.execute(
                     """INSERT INTO assessment_results
                        (session_id, task, description, raster_path, geojson_path,
                         overlay_path, summary_path, summary, geom, model_file,
-                        num_objects)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, %s)
+                        num_objects, raster_file, geojson_file, overlay_file, summary_file)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, %s,
+                               %s, %s, %s, %s)
                        RETURNING id""",
                     (
                         session_id,
@@ -390,6 +415,10 @@ class Database:
                         Jsonb(summary),
                         summary.get("model_file"),
                         summary.get("num_objects"),
+                        raster_file,
+                        geojson_file,
+                        overlay_file,
+                        summary_file,
                     ),
                 )
                 row = cur.fetchone()
@@ -398,8 +427,6 @@ class Database:
                     return None
                 assessment_id = row[0]
                 if geom_geojson:
-                    # 注意: 此处直接按 SRID=4326 存储. 若栅格位于投影坐标系,
-                    # bbox 坐标并非经纬度, 会有空间偏差 (已知限制, 暂不重投影)。
                     cur.execute(
                         """UPDATE assessment_results
                            SET geom = ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
