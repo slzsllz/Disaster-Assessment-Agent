@@ -32,6 +32,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent.error_memory import ErrorMemory
+from agent.db import db
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +84,19 @@ TEMP_BASE = PROJECT_ROOT / "tmp" / "fastapi_out"
 TEMP_BASE.mkdir(parents=True, exist_ok=True)
 ERROR_MEMORY = ErrorMemory(AGENT_DIR / "error_memory.json")
 
-DEFAULT_CONFIG = AGENT_DIR / "config_qwen3.json"
+DEFAULT_CONFIG = AGENT_DIR / next(
+    (
+        name
+        for name in (
+            os.getenv("AGENT_CONFIG"),
+            "config_qwen3.json",
+            "config_deepseek.json",
+            "config.json",
+        )
+        if name and (AGENT_DIR / name).exists()
+    ),
+    "config.json",
+)
 DEFAULT_SYSTEM_PROMPT = (
     "You are a geoscientist, and you need to use tools to answer Earth "
     "observation questions. Carefully reason about which tools to use and "
@@ -262,16 +275,21 @@ def load_model_config(config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     }
 
 
-def build_mcp_child_env() -> dict[str, str]:
+def build_mcp_child_env(session_id: str = "") -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key in MCP_CHILD_ENV_KEYS}
     env["CONDA_PREFIX"] = CONDA_PREFIX
     env["PATH"] = f"{CONDA_BIN}:{env.get('PATH', os.environ.get('PATH', ''))}"
+    # 让工具子进程把评估结果关联到当前会话 (见 agent/tools/utils.py)
+    if session_id:
+        env["DISASTER_SESSION_ID"] = session_id
     return env
 
 
-def build_mcp_servers(mcp_servers_cfg: dict[str, Any], temp_dir: Path) -> dict[str, Any]:
+def build_mcp_servers(
+    mcp_servers_cfg: dict[str, Any], temp_dir: Path, session_id: str = ""
+) -> dict[str, Any]:
     servers: dict[str, Any] = {}
-    child_env = build_mcp_child_env()
+    child_env = build_mcp_child_env(session_id)
     for name, server_cfg in mcp_servers_cfg.items():
         args: list[str] = []
         for arg in server_cfg.get("args", []):
@@ -293,7 +311,7 @@ def build_mcp_servers(mcp_servers_cfg: dict[str, Any], temp_dir: Path) -> dict[s
 class AgentHandle:
     """LangGraph/MCP agent pinned to one background asyncio loop."""
 
-    def __init__(self, config: dict[str, Any], temp_dir: Path):
+    def __init__(self, config: dict[str, Any], temp_dir: Path, session_id: str = ""):
         self.loop = asyncio.new_event_loop()
         self.ready: queue.Queue[bool] = queue.Queue(maxsize=1)
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -313,7 +331,9 @@ class AgentHandle:
                 request_timeout=180,
                 extra_body=config["generate_args"] or None,
             )
-            client = MultiServerMCPClient(build_mcp_servers(config["mcp_servers"], temp_dir))
+            client = MultiServerMCPClient(
+                build_mcp_servers(config["mcp_servers"], temp_dir, session_id)
+            )
             tools = await client.get_tools()
             agent = create_react_agent(llm, tools)
             return agent, client, tools
@@ -453,13 +473,109 @@ def sse_event(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# ---------------------------------------------------------------------------
+# DB row serializers -- convert dict_row results to JSON-friendly dicts.
+# FastAPI handles datetime/UUID encoding; we only reshape images/assessments.
+# ---------------------------------------------------------------------------
+def _image_descriptor(path: str) -> dict[str, str]:
+    """Image descriptor stored in chat_messages.images JSONB.
+
+    Keeps the absolute path so a history row loaded after a backend restart can
+    re-register the file (the /api/files/{id} mapping lives in-memory only).
+    """
+    return {"name": Path(path).name, "path": str(path)}
+
+
+def _serialize_message(row: dict) -> dict[str, Any]:
+    images: list[dict[str, str]] = []
+    for img in row.get("images") or []:
+        if not isinstance(img, dict):
+            continue
+        path = img.get("path")
+        if path and Path(path).exists():
+            images.append(file_payload(path))  # fresh /api/files/{id} url
+        elif img.get("url"):
+            images.append({"name": img.get("name", "image"), "url": img["url"]})
+    return {
+        "id": row["id"],
+        "role": row["role"],
+        "content": row.get("display_content") or row.get("content") or "",
+        "attachments": row.get("attachments") or [],
+        "images": images,
+        "tool_trace": row.get("tool_trace") or [],
+        "elapsed_seconds": row.get("elapsed_seconds"),
+        "tool_call_count": row.get("tool_call_count"),
+        "created_at": row.get("created_at"),
+    }
+
+
+def _serialize_session(row: dict) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "title": row.get("title") or "",
+        "model_name": row.get("model_name") or "",
+        "message_count": row.get("message_count") or 0,
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "first_message": row.get("first_message") or "",
+    }
+
+
+def _serialize_assessment(row: dict) -> dict[str, Any]:
+    overlay_path = row.get("overlay_path")
+    return {
+        "id": row["id"],
+        "session_id": str(row["session_id"]) if row.get("session_id") else None,
+        "task": row.get("task"),
+        "description": row.get("description"),
+        "raster_path": row.get("raster_path"),
+        "geojson_path": row.get("geojson_path"),
+        "overlay_path": overlay_path,
+        "summary_path": row.get("summary_path"),
+        "summary": row.get("summary") or {},
+        "num_objects": row.get("num_objects"),
+        "geom": row.get("geom_geojson"),
+        "created_at": row.get("created_at"),
+        "overlay_url": file_payload(overlay_path)["url"] if overlay_path and Path(overlay_path).exists() else None,
+    }
+
+
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     return {
         "ok": True,
         "model": MODEL_CONFIG["model_name"],
         "tools": list(MODEL_CONFIG["mcp_servers"].keys()),
+        "db_ok": db.health_check(),
     }
+
+
+@app.get("/api/sessions")
+def list_sessions(limit: int = 30) -> dict[str, Any]:
+    """列出最近的会话 -- 前端历史侧栏的数据来源 (DB)"""
+    rows = db.list_recent_sessions(limit=limit)
+    return {"sessions": [_serialize_session(r) for r in rows]}
+
+
+@app.get("/api/sessions/{session_id}/messages")
+def get_session_messages(session_id: str) -> dict[str, Any]:
+    """加载某会话的全部消息 -- 切换历史会话时从 DB 读取"""
+    rows = db.get_chat_messages(session_id)
+    return {"session_id": session_id, "messages": [_serialize_message(r) for r in rows]}
+
+
+@app.get("/api/sessions/{session_id}/assessments")
+def get_session_assessments(session_id: str) -> dict[str, Any]:
+    """某会话产生的评估结果 (模型输出)"""
+    rows = db.query_assessments(session_id=session_id)
+    return {"session_id": session_id, "assessments": [_serialize_assessment(r) for r in rows]}
+
+
+@app.get("/api/assessments")
+def list_assessments(task: str = "", limit: int = 50) -> dict[str, Any]:
+    """全局评估结果列表 (可按 task 过滤)"""
+    rows = db.query_assessments(task=task or None, limit=limit)
+    return {"assessments": [_serialize_assessment(r) for r in rows]}
 
 
 @app.post("/api/sessions/{session_id}/clear")
@@ -467,6 +583,7 @@ def clear_session(session_id: str) -> dict[str, bool]:
     session = get_session(session_id)
     with session.lock:
         session.messages.clear()
+    db.delete_session_messages(session_id)
     return {"ok": True}
 
 
@@ -510,8 +627,23 @@ def chat(
             user_content = "\n\n".join(content_parts) or "Please analyze the uploaded file(s)."
             session.messages.append({"role": "user", "content": user_content})
 
+            # Persist session + user message to DB (upsert; idempotent)
+            db.create_session(
+                session_id=session_id,
+                model_name=MODEL_CONFIG["model_name"],
+                config_path=MODEL_CONFIG["path"],
+                system_prompt=system_prompt,
+                title=(message.strip()[:80] or None),
+            )
+            db.save_chat_message(
+                session_id,
+                "user",
+                content=user_content,
+                attachments=[{"name": Path(p).name, "path": p} for p in uploaded_paths],
+            )
+
             if session.handle is None:
-                session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir)
+                session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir, session_id=session_id)
 
             data_roots = [str(BENCHMARK_DATA_DIR), str(session.uploads_dir), str(session.output_dir)]
             effective_prompt = build_system_prompt(system_prompt, data_roots)
@@ -534,6 +666,16 @@ def chat(
 
             session.messages.append(
                 {"role": "assistant", "content": final_answer or raw_answer}
+            )
+            db.save_chat_message(
+                session_id,
+                "assistant",
+                content=final_answer or raw_answer,
+                display_content=display_answer,
+                images=[_image_descriptor(p) for p in images],
+                tool_trace=trace,
+                elapsed_seconds=elapsed,
+                tool_call_count=len(trace),
             )
 
             return {
@@ -591,8 +733,23 @@ def chat_stream(
         user_content = "\n\n".join(content_parts) or "Please analyze the uploaded file(s)."
         session.messages.append({"role": "user", "content": user_content})
 
+        # Persist session + user message to DB (upsert; idempotent)
+        db.create_session(
+            session_id=session_id,
+            model_name=MODEL_CONFIG["model_name"],
+            config_path=MODEL_CONFIG["path"],
+            system_prompt=system_prompt,
+            title=(message.strip()[:80] or None),
+        )
+        db.save_chat_message(
+            session_id,
+            "user",
+            content=user_content,
+            attachments=[{"name": Path(p).name, "path": p} for p in uploaded_paths],
+        )
+
         if session.handle is None:
-            session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir)
+            session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir, session_id=session_id)
 
         data_roots = [str(BENCHMARK_DATA_DIR), str(session.uploads_dir), str(session.output_dir)]
         effective_prompt = build_system_prompt(system_prompt, data_roots)
@@ -634,6 +791,16 @@ def chat_stream(
 
                     session.messages.append(
                         {"role": "assistant", "content": final_answer or raw_answer or streamed_text}
+                    )
+                    db.save_chat_message(
+                        session_id,
+                        "assistant",
+                        content=final_answer or raw_answer or streamed_text,
+                        display_content=display_answer,
+                        images=[_image_descriptor(p) for p in images],
+                        tool_trace=trace,
+                        elapsed_seconds=elapsed,
+                        tool_call_count=len(trace),
                     )
 
                     yield sse_event(

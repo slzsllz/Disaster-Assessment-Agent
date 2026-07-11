@@ -2,7 +2,7 @@
 import { Bottom, Document, Edit, Plus, Top } from '@element-plus/icons-vue'
 import { ElSlider } from 'element-plus'
 import 'element-plus/es/components/slider/style/css'
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import logoUrl from './assets/szu-logo.png'
 
 const systemPrompt = ref(
@@ -157,6 +157,68 @@ function saveConversationHistory() {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(conversationHistory.value))
 }
 
+// ---------------------------------------------------------------------------
+// 后端数据加载 -- 会话历史与消息从数据库读取 (DB -> API -> 前端)
+// 失败时静默回退到 localStorage, 不阻断本地使用。
+// ---------------------------------------------------------------------------
+function mapApiMessage(m) {
+  const metaParts = []
+  if (m.elapsed_seconds != null) metaParts.push(`${Number(m.elapsed_seconds).toFixed(1)}s`)
+  if (m.tool_call_count != null) metaParts.push(`${m.tool_call_count} tool call(s)`)
+  return {
+    id: String(m.id),
+    role: m.role,
+    content: m.content || '',
+    meta: metaParts.join(' · '),
+    error: '',
+    images: (m.images || []).map((img) => ({ name: img.name || 'image', url: img.url })),
+    attachments: (m.attachments || []).map((a) => ({
+      id: a.name || a.path || 'file',
+      name: a.name || 'file',
+      size: a.size || 0,
+      type: a.type || '',
+      preview: '',
+    })),
+  }
+}
+
+function mapApiSession(s) {
+  const title = s.title || (s.first_message ? s.first_message.replace(/\s+/g, ' ').trim() : '')
+  return {
+    id: s.id,
+    title: title.length > 24 ? `${title.slice(0, 24)}...` : title || '新对话',
+    updatedAt: s.updated_at ? new Date(s.updated_at).getTime() : 0,
+    messages: [], // lazy-loaded on open
+  }
+}
+
+async function fetchSessions() {
+  try {
+    const res = await fetch('/api/sessions')
+    if (!res.ok) return
+    const data = await res.json()
+    const apiSessions = (data.sessions || []).map(mapApiSession)
+    const apiIds = new Set(apiSessions.map((s) => s.id))
+    // 保留 localStorage 中 DB 尚未收录的会话 (离线/旧数据)
+    const localOnly = conversationHistory.value.filter((c) => !apiIds.has(c.id))
+    conversationHistory.value = [...apiSessions, ...localOnly].slice(0, 30)
+    saveConversationHistory()
+  } catch {
+    // DB 不可用, 保持 localStorage 历史
+  }
+}
+
+async function fetchMessages(id) {
+  try {
+    const res = await fetch(`/api/sessions/${id}/messages`)
+    if (!res.ok) return null
+    const data = await res.json()
+    return (data.messages || []).map(mapApiMessage)
+  } catch {
+    return null
+  }
+}
+
 function upsertCurrentConversation() {
   if (!messages.value.length) return
 
@@ -189,13 +251,23 @@ function startNewConversation() {
   localStorage.setItem('chatDisasterSessionId', sessionId.value)
 }
 
-function openConversation(conversation) {
+async function openConversation(conversation) {
   if (conversation.id === sessionId.value) return
   upsertCurrentConversation()
   releasePendingFiles()
   sessionId.value = conversation.id
   localStorage.setItem('chatDisasterSessionId', sessionId.value)
-  messages.value = conversation.messages || []
+  // 优先用内存缓存的消息; 否则从后端 (DB) 拉取
+  if (conversation.messages && conversation.messages.length) {
+    messages.value = conversation.messages
+  } else {
+    messages.value = []
+    const fetched = await fetchMessages(conversation.id)
+    if (fetched && fetched.length) {
+      messages.value = fetched
+      conversation.messages = fetched
+    }
+  }
   showScrollBottom.value = false
   scrollToBottom()
 }
@@ -473,6 +545,21 @@ async function sendMessage() {
   }
 }
 
+onMounted(async () => {
+  // 当前会话若内存无消息 (如新浏览器/刷新), 从后端 DB 加载
+  if (!messages.value.length) {
+    const fetched = await fetchMessages(sessionId.value)
+    if (fetched && fetched.length) {
+      messages.value = fetched
+      const saved = conversationHistory.value.find((c) => c.id === sessionId.value)
+      if (saved) saved.messages = fetched
+      scrollToBottom()
+    }
+  }
+  // 用 DB 会话刷新历史侧栏 (DB 不可用时回退 localStorage)
+  await fetchSessions()
+})
+
 </script>
 
 <template>
@@ -584,8 +671,8 @@ async function sendMessage() {
 
       <header class="chat-header">
         <div>
-          <h1>哈哈哈哈哈哈哈哈哈哈哈哈哈哈</h1>
-          <p>占位 占位 占位 占位 占位 占位 占位 占位 占位</p>
+          <h1>灾害遥感智能评估助手</h1>
+          <p>基于多模态大模型与遥感 AI 工具的灾害损毁评估 · 洪水淹没 / 建筑损毁 / 火烧迹地</p>
         </div>
         <div class="header-actions">
           <span class="header-status">{{ isSending ? 'Analyzing' : 'Ready' }}</span>
