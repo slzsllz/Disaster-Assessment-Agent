@@ -28,6 +28,10 @@ Parameters:
 
 Returns:
 - dict: Damage pixel counts, damage ratio, damage level, and saved output paths.
+
+Answer guidance:
+- Generated images and download links are displayed at the bottom of the answer.
+- Do not repeat or list output file paths in the final natural-language answer.
 """
 
 parser = argparse.ArgumentParser()

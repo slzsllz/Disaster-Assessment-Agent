@@ -33,6 +33,10 @@ Parameters:
 
 Returns:
 - dict: Burned-area pixel counts, ratio, area estimate, optional label metrics, and saved output paths.
+
+Answer guidance:
+- Generated images and download links are displayed at the bottom of the answer.
+- Do not repeat or list output file paths in the final natural-language answer.
 """
 
 parser = argparse.ArgumentParser()

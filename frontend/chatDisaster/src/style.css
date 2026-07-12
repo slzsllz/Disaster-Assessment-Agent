@@ -703,6 +703,18 @@ input[type="checkbox"] {
   background: #f7f7f8;
   color: #202123;
   font-size: 0.76rem;
+  text-decoration: none;
+}
+
+.file-chip.downloadable {
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.file-chip.downloadable:hover {
+  border-color: #b8c0cc;
+  background: #ffffff;
+  transform: translateY(-1px);
 }
 
 .file-chip svg {
@@ -719,6 +731,11 @@ input[type="checkbox"] {
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-chip span {
+  color: #6e6e80;
+  font-size: 0.68rem;
 }
 
 .scroll-bottom-button {
