@@ -101,14 +101,41 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are a geoscientist, and you need to use tools to answer Earth "
     "observation questions. Carefully reason about which tools to use and "
     "in what order. When a tool returns 'Result saved at /path/to/file', "
-    "you MUST use that full path in all subsequent tool calls. Finish your "
-    "final response with a clearly labelled answer block, e.g.:\n"
+    "you MUST use that full path in all subsequent tool calls. Do not list "
+    "generated output file paths in the final answer; the frontend will "
+    "display images and downloads separately. Finish your final response "
+    "with a clearly labelled answer block, e.g.:\n"
     "<Answer>Your final answer</Answer>"
 )
 
 ANSWER_RE = re.compile(r"<Answer>(.*?)</Answer>", re.DOTALL | re.IGNORECASE)
 LOCAL_PATH_RE = re.compile(r"`?(/(?:home\d*|tmp)/[^\s`*),;]+(?:\.[A-Za-z0-9]+))`?")
-OVERLAY_RE = re.compile(r"[\w./~:-]*_overlay\.png")
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+MASK_OUTPUT_MARKERS = ("_mask.", "mask_path")
+OUTPUT_PATH_KEYS = {
+    "outputs",
+    "output_paths",
+    "mask_path",
+    "vis_path",
+    "visualization_path",
+    "overlay_path",
+    "comparison_path",
+    "summary_path",
+    "metrics_csv_path",
+    "geojson_path",
+    "raster_path",
+    "output_mask_path",
+    "flood_mask_path",
+    "flood_mask_png_path",
+    "building_mask_path",
+    "damage_mask_path",
+    "burned_mask_path",
+}
+OUTPUT_FILES_SECTION_RE = re.compile(
+    r"(?ims)^\s{0,3}#{1,6}\s*"
+    r"(?:[^\n#]*?(?:输出文件|生成文件|可视化输出|output files|generated files|visualization files)[^\n]*)"
+    r"\n.*?(?=^\s{0,3}#{1,6}\s+|\Z)"
+)
 
 
 def build_system_prompt(base: str, data_roots: list[str]) -> str:
@@ -134,6 +161,7 @@ def sanitize_local_paths(text: str) -> str:
 def sanitize_display_answer(text: str) -> str:
     """Hide machine-local absolute directories while preserving answer text."""
     cleaned = text or ""
+    cleaned = OUTPUT_FILES_SECTION_RE.sub("", cleaned)
     cleaned = sanitize_local_paths(cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned
@@ -212,46 +240,69 @@ def tool_trace(response: dict) -> list[dict[str, Any]]:
     return trace
 
 
-def extract_overlay_images(response: dict, *texts: str) -> list[str]:
+def _normalize_existing_file(value: str) -> str | None:
+    value = value.strip().strip("`'\" ,.;")
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    try:
+        path = path.resolve()
+    except Exception:
+        return None
+    return str(path) if path.exists() and path.is_file() else None
+
+
+def extract_tool_output_files(response: dict) -> list[str]:
+    """Collect every real file path returned by tools.
+
+    The frontend decides how to render each file: browser-friendly image
+    formats are previewed, other outputs are exposed as downloads.
+    """
     found: list[str] = []
 
     def add_path(value: str) -> None:
-        value = value.strip().strip("`'\" ,.;")
-        if not value.endswith("_overlay.png"):
-            return
-        path = Path(value)
-        if not path.is_absolute():
-            path = PROJECT_ROOT / path
-        if path.exists() and str(path) not in found:
-            found.append(str(path))
+        path = _normalize_existing_file(value)
+        if path and path not in found:
+            found.append(path)
 
-    def visit(obj: Any) -> None:
+    def visit(obj: Any, collect_strings: bool = False) -> None:
         if isinstance(obj, dict):
             for key, value in obj.items():
-                if key == "overlay_path" and isinstance(value, str):
-                    add_path(value)
-                else:
-                    visit(value)
+                key_name = str(key)
+                should_collect = collect_strings or key_name in OUTPUT_PATH_KEYS or key_name.endswith("_path")
+                visit(value, should_collect)
         elif isinstance(obj, list):
             for item in obj:
-                visit(item)
+                visit(item, collect_strings)
         elif isinstance(obj, str):
-            for match in OVERLAY_RE.findall(obj):
-                add_path(match)
+            if collect_strings:
+                add_path(obj)
+                for match in LOCAL_PATH_RE.findall(obj):
+                    add_path(match)
+            try:
+                visit(json.loads(obj), collect_strings)
+            except Exception:
+                pass
 
     for msg in response.get("messages", []):
         if isinstance(msg, ToolMessage):
-            content = msg.content
-            if isinstance(content, str):
-                try:
-                    visit(json.loads(content))
-                except Exception:
-                    visit(content)
-            else:
-                visit(content)
-    for text in texts:
-        visit(text)
+            visit(msg.content)
     return found
+
+
+def split_output_files(paths: list[str]) -> tuple[list[str], list[str]]:
+    images: list[str] = []
+    files: list[str] = []
+    for path in paths:
+        name = Path(path).name.lower()
+        suffix = Path(path).suffix.lower()
+        if suffix in IMAGE_EXTENSIONS and not any(marker in name for marker in MASK_OUTPUT_MARKERS):
+            images.append(path)
+        else:
+            files.append(path)
+    return images, files
 
 
 def substitute_env(value: str) -> str:
@@ -486,6 +537,10 @@ def _image_descriptor(path: str) -> dict[str, str]:
     return {"name": Path(path).name, "path": str(path)}
 
 
+def _file_descriptor(path: str) -> dict[str, str]:
+    return {"name": Path(path).name, "path": str(path)}
+
+
 def _serialize_message(row: dict) -> dict[str, Any]:
     images: list[dict[str, str]] = []
 
@@ -543,7 +598,16 @@ def _serialize_message(row: dict) -> dict[str, Any]:
 
     # 如果附件二进制为空，回退到路径方式
     if not attachments:
-        attachments = row.get("attachments") or []
+        for item in row.get("attachments") or []:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("path")
+            if path and Path(path).exists():
+                attachments.append(file_payload(path))
+            elif item.get("url"):
+                attachments.append({"name": item.get("name", "file"), "url": item["url"]})
+            else:
+                attachments.append(item)
 
     return {
         "id": row["id"],
@@ -732,7 +796,8 @@ def chat(
             final_answer = extract_final_answer(raw_answer)
             display_answer = sanitize_display_answer(final_answer or raw_answer)
             trace = tool_trace(response)
-            images = extract_overlay_images(response, raw_answer, final_answer)
+            output_paths = extract_tool_output_files(response)
+            images, output_files = split_output_files(output_paths)
 
             session.messages.append(
                 {"role": "assistant", "content": final_answer or raw_answer}
@@ -756,6 +821,7 @@ def chat(
                 "assistant",
                 content=final_answer or raw_answer,
                 display_content=display_answer,
+                attachments=[_file_descriptor(p) for p in output_files],
                 images=[_image_descriptor(p) for p in images],
                 tool_trace=trace,
                 elapsed_seconds=elapsed,
@@ -768,6 +834,7 @@ def chat(
                 "elapsed": elapsed,
                 "tool_calls": len(trace),
                 "images": [file_payload(path) for path in images],
+                "files": [file_payload(path) for path in output_files],
                 "trace": trace if show_trace else [],
             }
         except Exception as exc:  # noqa: BLE001
@@ -778,6 +845,7 @@ def chat(
                 "elapsed": 0,
                 "tool_calls": 0,
                 "images": [],
+                "files": [],
                 "trace": [],
                 "error": error_text,
                 "memory_suggestions": [
@@ -883,7 +951,8 @@ def chat_stream(
                         final_answer or raw_answer or streamed_text
                     )
                     trace = tool_trace(response)
-                    images = extract_overlay_images(response, raw_answer, final_answer, streamed_text)
+                    output_paths = extract_tool_output_files(response)
+                    images, output_files = split_output_files(output_paths)
 
                     session.messages.append(
                         {"role": "assistant", "content": final_answer or raw_answer or streamed_text}
@@ -907,6 +976,7 @@ def chat_stream(
                         "assistant",
                         content=final_answer or raw_answer or streamed_text,
                         display_content=display_answer,
+                        attachments=[_file_descriptor(p) for p in output_files],
                         images=[_image_descriptor(p) for p in images],
                         tool_trace=trace,
                         elapsed_seconds=elapsed,
@@ -921,6 +991,7 @@ def chat_stream(
                             "elapsed": elapsed,
                             "tool_calls": len(trace),
                             "images": [file_payload(path) for path in images],
+                            "files": [file_payload(path) for path in output_files],
                             "trace": trace if show_trace else [],
                         },
                     )
@@ -934,6 +1005,7 @@ def chat_stream(
                     "elapsed": 0,
                     "tool_calls": 0,
                     "images": [],
+                    "files": [],
                     "trace": [],
                     "error": error_text,
                     "memory_suggestions": [

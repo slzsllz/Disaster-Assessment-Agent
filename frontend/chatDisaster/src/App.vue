@@ -6,7 +6,7 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import logoUrl from './assets/szu-logo.png'
 
 const systemPrompt = ref(
-  "You are a geoscientist, and you need to use tools to answer Earth observation questions. Carefully reason about which tools to use and in what order. When a tool returns 'Result saved at /path/to/file', you MUST use that full path in all subsequent tool calls. Finish your final response with a clearly labelled answer block."
+  "You are a geoscientist, and you need to use tools to answer Earth observation questions. Carefully reason about which tools to use and in what order. When a tool returns 'Result saved at /path/to/file', you MUST use that full path in all subsequent tool calls. Do not list generated output file paths in the final answer; the frontend will display images and downloads separately. Finish your final response with a clearly labelled answer block."
 )
 const recursionLimit = ref(40)
 const maxExecutionTime = ref(600)
@@ -120,8 +120,34 @@ function renderMarkdown(value) {
   return html.join('')
 }
 
-function resultImageCaption(index) {
-  return index > 0 ? `可视化结果 ${index + 1}` : '可视化结果'
+function outputFileLabel(name = '') {
+  const lower = String(name).toLowerCase()
+  if (lower.includes('damage_overlay')) return '建筑损坏叠加可视化图'
+  if (lower.includes('building_mask')) return '建筑物检测掩膜图'
+  if (lower.includes('damage_mask')) return '建筑损坏等级掩膜图'
+  if (lower.includes('flood_overlay')) return '洪水淹没叠加可视化图'
+  if (lower.includes('flood_mask') && lower.endsWith('.tif')) return '洪水淹没掩膜 GeoTIFF'
+  if (lower.includes('flood_mask')) return '洪水淹没掩膜图片'
+  if (lower.includes('burned_area_overlay')) return '山火烧毁区叠加可视化图'
+  if (lower.includes('burned_area_comparison')) return '山火变化检测对比图'
+  if (lower.includes('burned_area_mask')) return '山火烧毁区掩膜图片'
+  if (lower.includes('burned_area_metrics')) return '山火烧毁区指标表 CSV'
+  if (lower.includes('landslide_vis')) return '滑坡识别叠加可视化图'
+  if (lower.includes('landslide_mask')) return '滑坡区域掩膜图片'
+  if (lower.includes('oil_vis')) return '海面溢油叠加可视化图'
+  if (lower.includes('oil_mask')) return '海面溢油掩膜图片'
+  if (lower.includes('pest_vis')) return '农作物害虫检测框图'
+  if (lower === 'summary.json' || lower.endsWith('_summary.json')) return '摘要报告 JSON'
+  if (lower.endsWith('.geojson')) return '矢量结果 GeoJSON'
+  if (lower.endsWith('.tif') || lower.endsWith('.tiff')) return 'GeoTIFF 栅格结果'
+  if (lower.endsWith('.csv')) return '结果表 CSV'
+  if (lower.endsWith('.json')) return '摘要报告 JSON'
+  if (lower.endsWith('.npy')) return 'NumPy 数据文件'
+  return name || '输出文件'
+}
+
+function resultImageCaption(image) {
+  return outputFileLabel(image?.name || '')
 }
 
 // ---------------------------------------------------------------------------
@@ -140,10 +166,11 @@ function mapApiMessage(m) {
     error: '',
     images: (m.images || []).map((img) => ({ name: img.name || 'image', url: img.url })),
     attachments: (m.attachments || []).map((a) => ({
-      id: a.name || a.path || 'file',
+      id: a.url || a.name || a.path || 'file',
       name: a.name || 'file',
       size: a.size || 0,
       type: a.type || '',
+      url: a.url || '',
       preview: '',
     })),
   }
@@ -402,11 +429,18 @@ function handleStreamBlock(block, assistantId) {
     message.content = payload.answer || message.content || '(empty response)'
     message.meta = `${Number(payload.elapsed || 0).toFixed(1)}s · ${payload.tool_calls || 0} tool call(s)`
     message.images = payload.images || []
+    message.attachments = (payload.files || []).map((file) => ({
+      id: file.url || file.name,
+      name: file.name || 'file',
+      url: file.url || '',
+      preview: '',
+    }))
     message.error = ''
   } else if (eventName === 'error') {
     message.content = payload.answer || '后端调用失败'
     message.meta = ''
     message.images = []
+    message.attachments = []
     message.error = payload.error || ''
   }
   followBottomIfNeeded()
@@ -457,6 +491,12 @@ async function sendMessage() {
         message.content = data.answer || '(empty response)'
         message.meta = `${Number(data.elapsed || 0).toFixed(1)}s · ${data.tool_calls || 0} tool call(s)`
         message.images = data.images || []
+        message.attachments = (data.files || []).map((file) => ({
+          id: file.url || file.name,
+          name: file.name || 'file',
+          url: file.url || '',
+          preview: '',
+        }))
         message.error = data.error || ''
       }
       scrollToBottom()
@@ -667,11 +707,25 @@ onMounted(async () => {
                 :class="{ image: file.preview }"
               >
                 <img v-if="file.preview" :src="file.preview" :alt="file.name" />
+                <a
+                  v-else-if="file.url"
+                  class="file-chip downloadable"
+                  :href="file.url"
+                  :download="file.name"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <Document />
+                  <strong>{{ fileExtension(file.name) }}</strong>
+                  <span>下载</span>
+                </a>
                 <div v-else class="file-chip">
                   <Document />
                   <strong>{{ fileExtension(file.name) }}</strong>
                 </div>
-                <figcaption>{{ file.name }}</figcaption>
+                <figcaption :title="file.name">
+                  {{ file.url ? outputFileLabel(file.name) : file.name }}
+                </figcaption>
               </figure>
             </div>
             <span v-if="message.meta" class="message-meta">{{ message.meta }}</span>
@@ -682,7 +736,7 @@ onMounted(async () => {
                 class="result-image"
               >
                 <img :src="image.url" :alt="image.name" />
-                <figcaption>{{ resultImageCaption(imageIndex) }}</figcaption>
+                <figcaption :title="image.name">{{ resultImageCaption(image) }}</figcaption>
               </figure>
             </div>
           </div>
