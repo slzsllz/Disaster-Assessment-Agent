@@ -241,6 +241,9 @@ def extract_flood_inundation(
             "0": "non-flood",
             "1": "flood",
         },
+        "legend": [
+            {"value": 1, "label": "洪水淹没区域", "color": "#0050ff"},
+        ],
     }
     summary_path = out_dir / "summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:

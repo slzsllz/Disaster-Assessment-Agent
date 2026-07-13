@@ -321,6 +321,9 @@ def _run_single_pair(
             "1": "burned-area change",
             "2": "other-events/ignored-label",
         },
+        "legend": [
+            {"value": 1, "label": "山火烧毁变化区域", "color": "#ff2e05"},
+        ],
     }
     return result
 
@@ -402,6 +405,9 @@ def _run_dataset(
         "comparison_path": selected["comparison_path"] if selected else "",
         "metrics_csv_path": str(csv_path),
         "top_samples": rows[:5],
+        "legend": [
+            {"value": 1, "label": "山火烧毁变化区域", "color": "#ff2e05"},
+        ],
     }
     return summary
 

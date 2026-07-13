@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import numpy as np
-from osgeo import gdal
+from osgeo import gdal, osr
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def get_geotransform(file_path) -> tuple:
 
 
 def _extract_bbox_geojson(raster_path: str) -> str | None:
-    """从栅格文件提取边界框,返回 GeoJSON Polygon 字符串"""
+    """从栅格文件提取 WGS84 边界框,返回 GeoJSON Polygon 字符串"""
     try:
         geo, proj = get_geotransform(raster_path)
         if geo is None:
@@ -71,14 +71,42 @@ def _extract_bbox_geojson(raster_path: str) -> str | None:
         ds = gdal.Open(raster_path)
         w, h = ds.RasterXSize, ds.RasterYSize
         ds = None
-        x0, dx, _, y0, _, dy = geo
-        x1 = x0 + w * dx
-        y1 = y0 + h * dy
-        xs = [x0, x1, x1, x0, x0]
-        ys = [y0, y0, y1, y1, y0]
+
+        def pixel_to_map(px: float, py: float) -> tuple[float, float]:
+            return (
+                geo[0] + px * geo[1] + py * geo[2],
+                geo[3] + px * geo[4] + py * geo[5],
+            )
+
+        coords = [
+            pixel_to_map(0, 0),
+            pixel_to_map(w, 0),
+            pixel_to_map(w, h),
+            pixel_to_map(0, h),
+            pixel_to_map(0, 0),
+        ]
+
+        def looks_like_lonlat(points: list[tuple[float, float]]) -> bool:
+            return all(-180 <= x <= 180 and -90 <= y <= 90 for x, y in points)
+
+        if proj and not looks_like_lonlat(coords):
+            source = osr.SpatialReference()
+            if source.ImportFromWkt(proj) == 0:
+                target = osr.SpatialReference()
+                target.ImportFromEPSG(4326)
+                if hasattr(source, "SetAxisMappingStrategy"):
+                    source.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+                    target.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+                transform = osr.CoordinateTransformation(source, target)
+                transformed = []
+                for x, y in coords:
+                    lon, lat, *_ = transform.TransformPoint(x, y)
+                    transformed.append((lon, lat))
+                coords = transformed
+
         return json.dumps({
             "type": "Polygon",
-            "coordinates": [[[x, y] for x, y in zip(xs, ys)]],
+            "coordinates": [[list(point) for point in coords]],
         })
     except Exception:
         return None

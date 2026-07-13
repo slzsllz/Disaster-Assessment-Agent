@@ -67,6 +67,12 @@ MCP_CHILD_ENV_KEYS = (
     "USER",
     "LANG",
     "LC_ALL",
+    "DB_ENABLED",
+    "DB_HOST",
+    "DB_PORT",
+    "DB_NAME",
+    "DB_USER",
+    "DB_PASSWORD",
 )
 
 load_dotenv(override=True)
@@ -112,6 +118,13 @@ ANSWER_RE = re.compile(r"<Answer>(.*?)</Answer>", re.DOTALL | re.IGNORECASE)
 LOCAL_PATH_RE = re.compile(r"`?(/(?:home\d*|tmp)/[^\s`*),;]+(?:\.[A-Za-z0-9]+))`?")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 MASK_OUTPUT_MARKERS = ("_mask.", "mask_path")
+DOWNLOAD_ONLY_IMAGE_MARKERS = (
+    "_comparison.",
+    "true_color_rgb.",
+    "mndwi_heatmap.",
+    "water_ndci_heatmap.",
+    "ndci_histogram.",
+)
 OUTPUT_PATH_KEYS = {
     "outputs",
     "output_paths",
@@ -292,17 +305,129 @@ def extract_tool_output_files(response: dict) -> list[str]:
     return found
 
 
+def extract_tool_legend(response: dict) -> list[dict[str, Any]]:
+    """Collect color legend entries returned by tools."""
+    legend: list[dict[str, Any]] = []
+
+    def add_entries(value: Any) -> None:
+        items = value.values() if isinstance(value, dict) and "label" not in value else value
+        if isinstance(items, dict):
+            items = [items]
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label") or item.get("meaning") or item.get("name")
+            color = item.get("color")
+            if label and color:
+                entry = {
+                    "label": str(label),
+                    "color": str(color),
+                    "value": item.get("value"),
+                }
+                if entry not in legend:
+                    legend.append(entry)
+
+    def visit(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key == "legend":
+                    add_entries(value)
+                else:
+                    visit(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                visit(item)
+        elif isinstance(obj, str):
+            try:
+                visit(json.loads(obj))
+            except Exception:
+                pass
+
+    for msg in response.get("messages", []):
+        if isinstance(msg, ToolMessage):
+            visit(msg.content)
+    return legend
+
+
 def split_output_files(paths: list[str]) -> tuple[list[str], list[str]]:
     images: list[str] = []
     files: list[str] = []
     for path in paths:
         name = Path(path).name.lower()
         suffix = Path(path).suffix.lower()
-        if suffix in IMAGE_EXTENSIONS and not any(marker in name for marker in MASK_OUTPUT_MARKERS):
+        if (
+            suffix in IMAGE_EXTENSIONS
+            and not any(marker in name for marker in MASK_OUTPUT_MARKERS)
+            and not any(marker in name for marker in DOWNLOAD_ONLY_IMAGE_MARKERS)
+        ):
             images.append(path)
         else:
             files.append(path)
     return images, files
+
+
+def extract_bbox_geojson_from_raster(path: str) -> str | None:
+    """Extract a WGS84 bbox GeoJSON from a georeferenced raster."""
+    try:
+        from osgeo import gdal, osr
+
+        ds = gdal.Open(path)
+        if ds is None:
+            return None
+        geo = ds.GetGeoTransform()
+        proj = ds.GetProjection()
+        width, height = ds.RasterXSize, ds.RasterYSize
+        ds = None
+        if geo == (0, 1.0, 0, 0, 0, 1.0):
+            return None
+
+        def pixel_to_map(px: float, py: float) -> tuple[float, float]:
+            return (
+                geo[0] + px * geo[1] + py * geo[2],
+                geo[3] + px * geo[4] + py * geo[5],
+            )
+
+        coords = [
+            pixel_to_map(0, 0),
+            pixel_to_map(width, 0),
+            pixel_to_map(width, height),
+            pixel_to_map(0, height),
+            pixel_to_map(0, 0),
+        ]
+
+        def looks_like_lonlat(points: list[tuple[float, float]]) -> bool:
+            return all(-180 <= x <= 180 and -90 <= y <= 90 for x, y in points)
+
+        if proj and not looks_like_lonlat(coords):
+            source = osr.SpatialReference()
+            if source.ImportFromWkt(proj) == 0:
+                target = osr.SpatialReference()
+                target.ImportFromEPSG(4326)
+                if hasattr(source, "SetAxisMappingStrategy"):
+                    source.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+                    target.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+                transform = osr.CoordinateTransformation(source, target)
+                transformed = []
+                for x, y in coords:
+                    lon, lat, *_ = transform.TransformPoint(x, y)
+                    transformed.append((lon, lat))
+                coords = transformed
+
+        return json.dumps({
+            "type": "Polygon",
+            "coordinates": [[list(point) for point in coords]],
+        })
+    except Exception:
+        return None
+
+
+def extract_first_output_geometry(paths: list[str]) -> str | None:
+    for path in paths:
+        if Path(path).suffix.lower() in {".tif", ".tiff"}:
+            geom = extract_bbox_geojson_from_raster(path)
+            if geom:
+                return geom
+    return None
 
 
 def substitute_env(value: str) -> str:
@@ -684,6 +809,22 @@ def get_session_assessments(session_id: str) -> dict[str, Any]:
     return {"session_id": session_id, "assessments": [_serialize_assessment(r) for r in rows]}
 
 
+@app.get("/api/sessions/{session_id}/latest-geometry")
+def get_session_latest_geometry(session_id: str) -> dict[str, Any]:
+    """返回某会话最新的空间范围, 用于前端地图自动定位。"""
+    rows = db.query_assessments(session_id=session_id, limit=20)
+    for row in rows:
+        if row.get("geom_geojson"):
+            assessment = _serialize_assessment(row)
+            return {
+                "session_id": session_id,
+                "found": True,
+                "assessment": assessment,
+                "geom": assessment["geom"],
+            }
+    return {"session_id": session_id, "found": False, "assessment": None, "geom": None}
+
+
 @app.get("/api/assessments")
 def list_assessments(task: str = "", limit: int = 50) -> dict[str, Any]:
     """全局评估结果列表 (可按 task 过滤)"""
@@ -798,6 +939,8 @@ def chat(
             trace = tool_trace(response)
             output_paths = extract_tool_output_files(response)
             images, output_files = split_output_files(output_paths)
+            geometry = extract_first_output_geometry(output_paths)
+            legend = extract_tool_legend(response)
 
             session.messages.append(
                 {"role": "assistant", "content": final_answer or raw_answer}
@@ -835,6 +978,8 @@ def chat(
                 "tool_calls": len(trace),
                 "images": [file_payload(path) for path in images],
                 "files": [file_payload(path) for path in output_files],
+                "geometry": geometry,
+                "legend": legend,
                 "trace": trace if show_trace else [],
             }
         except Exception as exc:  # noqa: BLE001
@@ -846,6 +991,8 @@ def chat(
                 "tool_calls": 0,
                 "images": [],
                 "files": [],
+                "geometry": None,
+                "legend": [],
                 "trace": [],
                 "error": error_text,
                 "memory_suggestions": [
@@ -953,6 +1100,8 @@ def chat_stream(
                     trace = tool_trace(response)
                     output_paths = extract_tool_output_files(response)
                     images, output_files = split_output_files(output_paths)
+                    geometry = extract_first_output_geometry(output_paths)
+                    legend = extract_tool_legend(response)
 
                     session.messages.append(
                         {"role": "assistant", "content": final_answer or raw_answer or streamed_text}
@@ -992,6 +1141,8 @@ def chat_stream(
                             "tool_calls": len(trace),
                             "images": [file_payload(path) for path in images],
                             "files": [file_payload(path) for path in output_files],
+                            "geometry": geometry,
+                            "legend": legend,
                             "trace": trace if show_trace else [],
                         },
                     )
@@ -1006,6 +1157,8 @@ def chat_stream(
                     "tool_calls": 0,
                     "images": [],
                     "files": [],
+                    "geometry": None,
+                    "legend": [],
                     "trace": [],
                     "error": error_text,
                     "memory_suggestions": [

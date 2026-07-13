@@ -244,6 +244,12 @@ def assess_building_damage(
             "3": "major-damage",
             "4": "destroyed",
         },
+        "legend": [
+            {"value": 1, "label": "建筑物/无损坏", "color": "#00b400"},
+            {"value": 2, "label": "轻微损坏", "color": "#ffdc00"},
+            {"value": 3, "label": "严重损坏", "color": "#ff8c00"},
+            {"value": 4, "label": "完全摧毁", "color": "#ff0000"},
+        ],
     }
     summary_path = out_dir / "summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
