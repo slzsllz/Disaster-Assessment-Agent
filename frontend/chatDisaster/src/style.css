@@ -668,13 +668,14 @@ input[type="checkbox"] {
 
 .result-images {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 1rem;
   margin-top: 1rem;
 }
 
 .result-image {
-  width: min(420px, 100%);
+  width: min(460px, 100%);
   margin: 0;
 }
 

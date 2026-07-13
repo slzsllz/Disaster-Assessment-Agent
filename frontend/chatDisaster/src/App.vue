@@ -140,8 +140,14 @@ function renderTable(rows) {
   return `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`
 }
 
+function stripArtifactBlock(value) {
+  return String(value ?? '')
+    .replace(/<Artifacts>[\s\S]*?<\/Artifacts>/gi, '')
+    .replace(/<Artifacts>[\s\S]*$/i, '')
+}
+
 function renderMarkdown(value) {
-  const lines = String(value ?? '').split('\n')
+  const lines = stripArtifactBlock(value).split('\n')
   const html = []
   let listOpen = false
 

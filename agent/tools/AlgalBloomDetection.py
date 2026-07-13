@@ -36,7 +36,9 @@ Interpretation guidance:
 - The input must include the B5 red-edge band; standard NDCI cannot run without it.
 
 Answer guidance:
-- Generated images and download links are displayed at the bottom of the answer.
+- Return all generated output paths in the tool result, but do not assume every output is useful to the user.
+- The language model should inspect the tool result and choose which images are useful for frontend display and which files are useful downloads via the final <Artifacts> block.
+- For each selected downloadable file, explain what it contains and how the user can use it, e.g. GIS overlay, quantitative summary, or downstream verification.
 - Do not repeat or list output file paths in the final natural-language answer.
 """
 
