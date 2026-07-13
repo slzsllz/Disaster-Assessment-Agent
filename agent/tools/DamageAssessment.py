@@ -30,7 +30,9 @@ Returns:
 - dict: Damage pixel counts, damage ratio, damage level, and saved output paths.
 
 Answer guidance:
-- Generated images and download links are displayed at the bottom of the answer.
+- Return all generated output paths in the tool result, but do not assume every output is useful to the user.
+- The language model should inspect the tool result and choose which images are useful for frontend display and which files are useful downloads via the final <Artifacts> block.
+- For each selected downloadable file, explain what it contains and how the user can use it, e.g. GIS overlay, quantitative summary, or downstream verification.
 - Do not repeat or list output file paths in the final natural-language answer.
 """
 
@@ -244,6 +246,12 @@ def assess_building_damage(
             "3": "major-damage",
             "4": "destroyed",
         },
+        "legend": [
+            {"value": 1, "label": "建筑物/无损坏", "color": "#00b400"},
+            {"value": 2, "label": "轻微损坏", "color": "#ffdc00"},
+            {"value": 3, "label": "严重损坏", "color": "#ff8c00"},
+            {"value": 4, "label": "完全摧毁", "color": "#ff0000"},
+        ],
     }
     summary_path = out_dir / "summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:

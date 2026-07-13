@@ -23,9 +23,12 @@ const chatContentRef = ref(null)
 const showScrollBottom = ref(false)
 const amapContainerRef = ref(null)
 const amapMap = ref(null)
+const amapOverlays = ref([])
 const amapLoading = ref(false)
 const amapError = ref('')
 const mapViewMode = ref('standard')
+const activeMapAssessment = ref(null)
+const mapNotice = ref('暂无空间范围')
 const amapKey = import.meta.env.VITE_AMAP_KEY || ''
 const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE || ''
 
@@ -38,6 +41,41 @@ const sortedConversationHistory = computed(() => {
     const timeB = b.updatedAt || 0
     return timeB - timeA // 降序：最新的在前
   })
+})
+
+const currentConversation = computed(() => {
+  return conversationHistory.value.find((item) => item.id === sessionId.value) || null
+})
+
+function compactTitle(value) {
+  const title = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!title) return ''
+  return title.length > 32 ? `${title.slice(0, 32)}...` : title
+}
+
+const currentConversationTitle = computed(() => {
+  const savedTitle = currentConversation.value?.title
+  if (savedTitle && savedTitle !== '新对话') return savedTitle
+  const firstUserMessage = messages.value.find((item) => item.role === 'user')?.content
+  return compactTitle(firstUserMessage) || '新对话'
+})
+
+function formatDateTime(timestamp) {
+  if (!timestamp) return '暂无更新时间'
+  const date = new Date(timestamp)
+  const pad = (value) => String(value).padStart(2, '0')
+  const monthDayTime = `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  if (date.getFullYear() === new Date().getFullYear()) {
+    return monthDayTime
+  }
+  return `${date.getFullYear()}-${monthDayTime}`
+}
+
+const currentConversationUpdatedAt = computed(() => {
+  const savedTime = currentConversation.value?.updatedAt || 0
+  if (savedTime) return formatDateTime(savedTime)
+  if (messages.value.length) return formatDateTime(Date.now())
+  return '尚未开始对话'
 })
 const previewableImageTypes = new Set([
   'image/png',
@@ -74,8 +112,42 @@ function renderInlineMarkdown(value) {
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
 }
 
+function isTableRow(line) {
+  return /^\|.*\|$/.test(line.trim())
+}
+
+function isTableDivider(line) {
+  return /^\|\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line.trim())
+}
+
+function parseTableCells(line) {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim())
+}
+
+function renderTable(rows) {
+  if (rows.length < 2 || !isTableDivider(rows[1])) return ''
+  const headers = parseTableCells(rows[0])
+  const bodyRows = rows.slice(2).filter(isTableRow).map(parseTableCells)
+  const head = headers.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join('')
+  const body = bodyRows
+    .map((cells) => `<tr>${cells.map((cell) => `<td>${renderInlineMarkdown(cell)}</td>`).join('')}</tr>`)
+    .join('')
+  return `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`
+}
+
+function stripArtifactBlock(value) {
+  return String(value ?? '')
+    .replace(/<Artifacts>[\s\S]*?<\/Artifacts>/gi, '')
+    .replace(/<Artifacts>[\s\S]*$/i, '')
+}
+
 function renderMarkdown(value) {
-  const lines = String(value ?? '').split('\n')
+  const lines = stripArtifactBlock(value).split('\n')
   const html = []
   let listOpen = false
 
@@ -86,10 +158,24 @@ function renderMarkdown(value) {
     }
   }
 
-  for (const rawLine of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index]
     const line = rawLine.trim()
     if (!line) {
       closeList()
+      continue
+    }
+
+    if (isTableRow(line) && isTableDivider(lines[index + 1] || '')) {
+      closeList()
+      const tableRows = [line, lines[index + 1].trim()]
+      index += 2
+      while (index < lines.length && isTableRow(lines[index])) {
+        tableRows.push(lines[index].trim())
+        index += 1
+      }
+      index -= 1
+      html.push(renderTable(tableRows))
       continue
     }
 
@@ -136,7 +222,16 @@ function outputFileLabel(name = '') {
   if (lower.includes('landslide_mask')) return '滑坡区域掩膜图片'
   if (lower.includes('oil_vis')) return '海面溢油叠加可视化图'
   if (lower.includes('oil_mask')) return '海面溢油掩膜图片'
-  if (lower.includes('pest_vis')) return '农作物害虫检测框图'
+  if (lower.includes('pest_vis')) return '受害植株/区域检测框图'
+  if (lower.includes('true_color_rgb')) return 'Sentinel-2 真彩色预览图'
+  if (lower.includes('mndwi_water_mask')) return 'MNDWI 水体掩膜图'
+  if (lower.includes('mndwi_heatmap')) return 'MNDWI 水体指数热力图'
+  if (lower.includes('water_ndci_heatmap')) return '水体区域 NDCI 热力图'
+  if (lower.includes('ndci_bloom_overlay')) return '候选藻华叠加可视化图'
+  if (lower.includes('ndci_histogram')) return '水体 NDCI 直方图'
+  if (lower.includes('ndci_comparison')) return '藻华检测综合对比图'
+  if (lower.includes('ndci_bloom_mask')) return '候选藻华掩膜 GeoTIFF'
+  if (lower === 'stats.json') return 'NDCI 统计诊断 JSON'
   if (lower === 'summary.json' || lower.endsWith('_summary.json')) return '摘要报告 JSON'
   if (lower.endsWith('.geojson')) return '矢量结果 GeoJSON'
   if (lower.endsWith('.tif') || lower.endsWith('.tiff')) return 'GeoTIFF 栅格结果'
@@ -148,6 +243,17 @@ function outputFileLabel(name = '') {
 
 function resultImageCaption(image) {
   return outputFileLabel(image?.name || '')
+}
+
+function imageLegendItems(image, message) {
+  const lower = String(image?.name || '').toLowerCase()
+  if (lower.includes('ndci_bloom_overlay')) return message.legend || []
+  return []
+}
+
+function hasDetachedLegend(message) {
+  if (!message.legend?.length) return false
+  return !(message.images || []).some((image) => imageLegendItems(image, message).length)
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +271,7 @@ function mapApiMessage(m) {
     meta: metaParts.join(' · '),
     error: '',
     images: (m.images || []).map((img) => ({ name: img.name || 'image', url: img.url })),
+    legend: m.legend || [],
     attachments: (m.attachments || []).map((a) => ({
       id: a.url || a.name || a.path || 'file',
       name: a.name || 'file',
@@ -220,6 +327,7 @@ function startNewConversation() {
   messages.value = []
   showScrollBottom.value = false
   sessionId.value = crypto.randomUUID()
+  clearMapGeometry()
 }
 
 async function openConversation(conversation) {
@@ -231,6 +339,8 @@ async function openConversation(conversation) {
   if (fetched && fetched.length) {
     messages.value = fetched
   }
+  const hasGeometry = await showLatestSessionGeometry()
+  if (!hasGeometry) clearMapGeometry()
   showScrollBottom.value = false
   scrollToBottom()
 }
@@ -267,6 +377,117 @@ function applyAmapLayer() {
 function setMapViewMode(mode) {
   mapViewMode.value = mode
   applyAmapLayer()
+}
+
+function clearMapGeometry() {
+  if (amapMap.value && amapOverlays.value.length) {
+    amapMap.value.remove(amapOverlays.value)
+  }
+  amapOverlays.value = []
+  activeMapAssessment.value = null
+  mapNotice.value = '暂无空间范围'
+}
+
+function outOfChina(lng, lat) {
+  return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271
+}
+
+function transformLat(lng, lat) {
+  let ret = -100.0 + 2.0 * lng + 3.0 * lat + 0.2 * lat * lat + 0.1 * lng * lat + 0.2 * Math.sqrt(Math.abs(lng))
+  ret += ((20.0 * Math.sin(6.0 * lng * Math.PI) + 20.0 * Math.sin(2.0 * lng * Math.PI)) * 2.0) / 3.0
+  ret += ((20.0 * Math.sin(lat * Math.PI) + 40.0 * Math.sin((lat / 3.0) * Math.PI)) * 2.0) / 3.0
+  ret += ((160.0 * Math.sin((lat / 12.0) * Math.PI) + 320 * Math.sin((lat * Math.PI) / 30.0)) * 2.0) / 3.0
+  return ret
+}
+
+function transformLng(lng, lat) {
+  let ret = 300.0 + lng + 2.0 * lat + 0.1 * lng * lng + 0.1 * lng * lat + 0.1 * Math.sqrt(Math.abs(lng))
+  ret += ((20.0 * Math.sin(6.0 * lng * Math.PI) + 20.0 * Math.sin(2.0 * lng * Math.PI)) * 2.0) / 3.0
+  ret += ((20.0 * Math.sin(lng * Math.PI) + 40.0 * Math.sin((lng / 3.0) * Math.PI)) * 2.0) / 3.0
+  ret += ((150.0 * Math.sin((lng / 12.0) * Math.PI) + 300.0 * Math.sin((lng / 30.0) * Math.PI)) * 2.0) / 3.0
+  return ret
+}
+
+function wgs84ToGcj02(lng, lat) {
+  if (outOfChina(lng, lat)) return [lng, lat]
+  const a = 6378245.0
+  const ee = 0.00669342162296594323
+  let dLat = transformLat(lng - 105.0, lat - 35.0)
+  let dLng = transformLng(lng - 105.0, lat - 35.0)
+  const radLat = (lat / 180.0) * Math.PI
+  let magic = Math.sin(radLat)
+  magic = 1 - ee * magic * magic
+  const sqrtMagic = Math.sqrt(magic)
+  dLat = (dLat * 180.0) / (((a * (1 - ee)) / (magic * sqrtMagic)) * Math.PI)
+  dLng = (dLng * 180.0) / ((a / sqrtMagic) * Math.cos(radLat) * Math.PI)
+  return [lng + dLng, lat + dLat]
+}
+
+function geometryToRings(geom) {
+  if (!geom) return []
+  const geometry = typeof geom === 'string' ? JSON.parse(geom) : geom
+  if (geometry.type === 'Polygon') {
+    return [geometry.coordinates?.[0] || []]
+  }
+  if (geometry.type === 'MultiPolygon') {
+    return (geometry.coordinates || []).map((polygon) => polygon?.[0] || []).filter(Boolean)
+  }
+  return []
+}
+
+async function drawAssessmentGeometry(assessment) {
+  if (!assessment?.geom) return false
+  await openMapDrawer()
+  if (!amapMap.value || !window.AMap) return false
+
+  let rings = []
+  try {
+    rings = geometryToRings(assessment.geom)
+  } catch {
+    mapNotice.value = '空间范围解析失败'
+    return false
+  }
+  if (!rings.length) return false
+
+  if (amapOverlays.value.length) {
+    amapMap.value.remove(amapOverlays.value)
+  }
+
+  const AMap = window.AMap
+  const polygons = rings
+    .map((ring) => ring
+      .filter((point) => Array.isArray(point) && point.length >= 2)
+      .map(([lng, lat]) => wgs84ToGcj02(Number(lng), Number(lat))))
+    .filter((ring) => ring.length >= 3)
+    .map((path) => new AMap.Polygon({
+      path,
+      strokeColor: '#ef4444',
+      strokeWeight: 2,
+      strokeOpacity: 0.95,
+      fillColor: '#ef4444',
+      fillOpacity: 0.18,
+      zIndex: 80,
+    }))
+
+  if (!polygons.length) return false
+  amapMap.value.add(polygons)
+  amapMap.value.setFitView(polygons, false, [48, 48, 48, 48])
+  amapOverlays.value = polygons
+  activeMapAssessment.value = assessment
+  mapNotice.value = `${assessment.task || '分析结果'} 空间范围`
+  return true
+}
+
+async function showLatestSessionGeometry() {
+  try {
+    const res = await fetch(`/api/sessions/${sessionId.value}/latest-geometry`)
+    if (!res.ok) return false
+    const data = await res.json()
+    if (!data.found || !data.assessment?.geom) return false
+    return drawAssessmentGeometry(data.assessment)
+  } catch {
+    return false
+  }
 }
 
 function loadAmapScript() {
@@ -429,17 +650,22 @@ function handleStreamBlock(block, assistantId) {
     message.content = payload.answer || message.content || '(empty response)'
     message.meta = `${Number(payload.elapsed || 0).toFixed(1)}s · ${payload.tool_calls || 0} tool call(s)`
     message.images = payload.images || []
+    message.legend = payload.legend || []
     message.attachments = (payload.files || []).map((file) => ({
       id: file.url || file.name,
       name: file.name || 'file',
       url: file.url || '',
       preview: '',
     }))
+    if (payload.geometry) {
+      drawAssessmentGeometry({ task: '当前分析结果', geom: payload.geometry })
+    }
     message.error = ''
   } else if (eventName === 'error') {
     message.content = payload.answer || '后端调用失败'
     message.meta = ''
     message.images = []
+    message.legend = []
     message.attachments = []
     message.error = payload.error || ''
   }
@@ -491,12 +717,16 @@ async function sendMessage() {
         message.content = data.answer || '(empty response)'
         message.meta = `${Number(data.elapsed || 0).toFixed(1)}s · ${data.tool_calls || 0} tool call(s)`
         message.images = data.images || []
+        message.legend = data.legend || []
         message.attachments = (data.files || []).map((file) => ({
           id: file.url || file.name,
           name: file.name || 'file',
           url: file.url || '',
           preview: '',
         }))
+        if (data.geometry) {
+          await drawAssessmentGeometry({ task: '当前分析结果', geom: data.geometry })
+        }
         message.error = data.error || ''
       }
       scrollToBottom()
@@ -537,6 +767,7 @@ async function sendMessage() {
   } finally {
     isSending.value = false
     await fetchSessions()
+    await showLatestSessionGeometry()
   }
 }
 
@@ -559,12 +790,12 @@ onMounted(async () => {
     </button>
 
     <aside class="sidebar">
-      <div class="sidebar-title">Disaster Detection Agent</div>
+      <div class="sidebar-title">灾害检测智能体</div>
 
       <section class="sidebar-section">
-        <h2>Advanced</h2>
+        <h2>高级设置</h2>
         <label class="slider-label">
-          <span>Recursion limit</span>
+          <span>智能体最大执行步数</span>
           <strong>{{ recursionLimit }}</strong>
         </label>
         <el-slider
@@ -576,7 +807,7 @@ onMounted(async () => {
         />
 
         <label class="slider-label">
-          <span>Max execution time (s)</span>
+          <span>智能体最长执行时间（秒）</span>
           <strong>{{ maxExecutionTime }}</strong>
         </label>
         <el-slider
@@ -589,7 +820,7 @@ onMounted(async () => {
 
         <label class="checkbox-row">
           <input v-model="showTrace" type="checkbox" />
-          <span>Show tool-call trace</span>
+          <span>显示工具调用轨迹</span>
         </label>
       </section>
 
@@ -632,8 +863,9 @@ onMounted(async () => {
       <header class="map-drawer-header">
         <div>
           <h2>地图</h2>
+          <p>{{ mapNotice }}</p>
         </div>
-        <div class="map-layer-toggle" role="group" aria-label="Map layer">
+        <div class="map-layer-toggle" role="group" aria-label="地图图层">
           <button
             type="button"
             :class="{ active: mapViewMode === 'standard' }"
@@ -653,13 +885,13 @@ onMounted(async () => {
       </header>
 
       <div class="map-panel">
-        <div v-if="amapLoading" class="map-state">Loading AMap...</div>
+        <div v-if="amapLoading" class="map-state">地图加载中...</div>
         <div v-else-if="amapError" class="map-state error">{{ amapError }}</div>
         <div v-show="!amapLoading && !amapError" ref="amapContainerRef" class="amap-container" />
       </div>
 
       <footer class="map-drawer-footer">
-        <span>Disaster Detection Agent</span>
+        <span>灾害检测智能体</span>
       </footer>
     </aside>
 
@@ -668,18 +900,18 @@ onMounted(async () => {
 
       <header class="chat-header">
         <div>
-          <h1>灾害遥感智能评估助手</h1>
-          <p>基于多模态大模型与遥感 AI 工具的灾害损毁评估 · 洪水淹没 / 建筑损毁 / 火烧迹地</p>
+          <h1>{{ currentConversationTitle }}</h1>
+          <p>{{ currentConversationUpdatedAt }}</p>
         </div>
         <div class="header-actions">
-          <span class="header-status">{{ isSending ? 'Analyzing' : 'Ready' }}</span>
+          <span class="header-status">{{ isSending ? '分析中' : '就绪' }}</span>
           <button
             class="map-toggle"
             type="button"
-            :aria-label="mapDrawerOpen ? 'Hide map' : 'Show map'"
+            :aria-label="mapDrawerOpen ? '隐藏地图' : '显示地图'"
             @click="mapDrawerOpen ? (mapDrawerOpen = false) : openMapDrawer()"
           >
-            {{ mapDrawerOpen ? 'Hide map' : 'Map' }}
+            {{ mapDrawerOpen ? '隐藏地图' : '地图' }}
           </button>
         </div>
       </header>
@@ -737,7 +969,27 @@ onMounted(async () => {
               >
                 <img :src="image.url" :alt="image.name" />
                 <figcaption :title="image.name">{{ resultImageCaption(image) }}</figcaption>
+                <div v-if="imageLegendItems(image, message).length" class="result-legend image-legend">
+                  <span
+                    v-for="item in imageLegendItems(image, message)"
+                    :key="`${item.label}-${item.color}`"
+                    class="legend-item"
+                  >
+                    <i :style="{ backgroundColor: item.color }" />
+                    <span>{{ item.label }}</span>
+                  </span>
+                </div>
               </figure>
+            </div>
+            <div v-if="hasDetachedLegend(message)" class="result-legend">
+              <span
+                v-for="item in message.legend"
+                :key="`${item.label}-${item.color}`"
+                class="legend-item"
+              >
+                <i :style="{ backgroundColor: item.color }" />
+                <span>{{ item.label }}</span>
+              </span>
             </div>
           </div>
         </article>
@@ -747,14 +999,14 @@ onMounted(async () => {
         v-if="showScrollBottom"
         class="scroll-bottom-button"
         type="button"
-        title="Back to bottom"
+        title="回到底部"
         @click="scrollToBottom('smooth')"
       >
         <Bottom />
       </button>
 
       <form class="composer" @submit.prevent="sendMessage">
-        <label class="upload-button" title="Attach files">
+        <label class="upload-button" title="添加文件">
           <Plus />
           <input multiple type="file" @change="handleFiles" />
         </label>
@@ -774,7 +1026,7 @@ onMounted(async () => {
           </div>
           <textarea
             v-model="inputText"
-            placeholder="Ask anything, or attach raster/image files"
+            placeholder="输入问题，或添加栅格/图片文件"
             rows="1"
             :disabled="isSending"
             @keydown.enter.exact.prevent="sendMessage"

@@ -782,6 +782,9 @@ def geoai_semantic_segmentation(
         "input_path": input_path,
         "output_mask_path": str(output_path),
         "class_meaning": {"0": "background", "1": cfg["description"].split("(")[0].strip()},
+        "legend": [
+            {"value": 1, "label": cfg["description"].split("(")[0].strip(), "color": "#00bfff"},
+        ],
     }
     if prob_path:
         summary["probability_path"] = str(prob_path)

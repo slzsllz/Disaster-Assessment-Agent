@@ -35,7 +35,9 @@ Returns:
 - dict: Burned-area pixel counts, ratio, area estimate, optional label metrics, and saved output paths.
 
 Answer guidance:
-- Generated images and download links are displayed at the bottom of the answer.
+- Return all generated output paths in the tool result, but do not assume every output is useful to the user.
+- The language model should inspect the tool result and choose which images are useful for frontend display and which files are useful downloads via the final <Artifacts> block.
+- For each selected downloadable file, explain what it contains and how the user can use it, e.g. GIS overlay, quantitative summary, or downstream verification.
 - Do not repeat or list output file paths in the final natural-language answer.
 """
 
@@ -321,6 +323,9 @@ def _run_single_pair(
             "1": "burned-area change",
             "2": "other-events/ignored-label",
         },
+        "legend": [
+            {"value": 1, "label": "山火烧毁变化区域", "color": "#ff2e05"},
+        ],
     }
     return result
 
@@ -402,6 +407,9 @@ def _run_dataset(
         "comparison_path": selected["comparison_path"] if selected else "",
         "metrics_csv_path": str(csv_path),
         "top_samples": rows[:5],
+        "legend": [
+            {"value": 1, "label": "山火烧毁变化区域", "color": "#ff2e05"},
+        ],
     }
     return summary
 

@@ -12,7 +12,9 @@ small HTTP API for the Vue app:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
 import os
 import queue
 import re
@@ -67,6 +69,12 @@ MCP_CHILD_ENV_KEYS = (
     "USER",
     "LANG",
     "LC_ALL",
+    "DB_ENABLED",
+    "DB_HOST",
+    "DB_PORT",
+    "DB_NAME",
+    "DB_USER",
+    "DB_PASSWORD",
 )
 
 load_dotenv(override=True)
@@ -107,11 +115,37 @@ DEFAULT_SYSTEM_PROMPT = (
     "with a clearly labelled answer block, e.g.:\n"
     "<Answer>Your final answer</Answer>"
 )
+ARTIFACT_SELECTION_PROMPT = (
+    "\n\nArtifact selection — after using a disaster tool, choose only the generated "
+    "artifacts that are useful for the user. If you can judge from the tool output, "
+    "include an optional machine-readable block after the answer:\n"
+    "<Artifacts>{\"display\":[\"useful image filename or path\"],"
+    "\"download\":[\"useful file filename or path\"]}</Artifacts>\n"
+    "Do not select every generated intermediate file by default. Prefer one clear "
+    "overlay/diagnostic image for display and only downloadable GIS/report files "
+    "that help the user verify or reuse the result. In the final answer, explain "
+    "each selected downloadable file in user-facing terms: what it contains, what "
+    "the user can do with it, and which software/workflow it is useful for. Do not "
+    "only repeat the filename."
+)
 
 ANSWER_RE = re.compile(r"<Answer>(.*?)</Answer>", re.DOTALL | re.IGNORECASE)
+ARTIFACTS_RE = re.compile(r"<Artifacts>(.*?)</Artifacts>", re.DOTALL | re.IGNORECASE)
 LOCAL_PATH_RE = re.compile(r"`?(/(?:home\d*|tmp)/[^\s`*),;]+(?:\.[A-Za-z0-9]+))`?")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+MULTIMODAL_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+TEXT_PREVIEW_EXTENSIONS = {".json", ".txt", ".csv", ".geojson", ".md"}
+EXCLUDED_ARTIFACT_EXTENSIONS = {".pt", ".pth", ".th", ".ckpt", ".safetensors", ".py", ".bak"}
+MAX_MULTIMODAL_IMAGE_BYTES = int(os.getenv("MAX_MULTIMODAL_IMAGE_BYTES", str(6 * 1024 * 1024)))
+MAX_TEXT_PREVIEW_CHARS = int(os.getenv("MAX_TEXT_PREVIEW_CHARS", "2500"))
 MASK_OUTPUT_MARKERS = ("_mask.", "mask_path")
+DOWNLOAD_ONLY_IMAGE_MARKERS = (
+    "_comparison.",
+    "true_color_rgb.",
+    "mndwi_heatmap.",
+    "water_ndci_heatmap.",
+    "ndci_histogram.",
+)
 OUTPUT_PATH_KEYS = {
     "outputs",
     "output_paths",
@@ -148,7 +182,7 @@ def build_system_prompt(base: str, data_roots: list[str]) -> str:
         "the data the user is referring to:\n"
         + "\n".join(f"  - {root}" for root in data_roots)
     )
-    return base + roots_block + ERROR_MEMORY.format_prompt_block()
+    return base + ARTIFACT_SELECTION_PROMPT + roots_block + ERROR_MEMORY.format_prompt_block()
 
 
 def sanitize_local_paths(text: str) -> str:
@@ -161,7 +195,7 @@ def sanitize_local_paths(text: str) -> str:
 def sanitize_display_answer(text: str) -> str:
     """Hide machine-local absolute directories while preserving answer text."""
     cleaned = text or ""
-    cleaned = OUTPUT_FILES_SECTION_RE.sub("", cleaned)
+    cleaned = ARTIFACTS_RE.sub("", cleaned)
     cleaned = sanitize_local_paths(cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned
@@ -170,15 +204,208 @@ def sanitize_display_answer(text: str) -> str:
 def extract_final_answer(text: str) -> str:
     if not text:
         return ""
+    text = ARTIFACTS_RE.sub("", text).strip()
     match = ANSWER_RE.search(text)
     if not match:
         return text.strip()
     before = text[: match.start()].strip()
     answer = match.group(1).strip()
     after = text[match.end() :].strip()
-    if len(before) + len(after) > 80:
-        return "\n\n".join(part for part in (before, answer, after) if part)
-    return answer
+    return "\n\n".join(part for part in (before, answer, after) if part)
+
+
+def file_kind(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        return "image"
+    if suffix in {".tif", ".tiff"}:
+        return "geotiff"
+    if suffix in TEXT_PREVIEW_EXTENSIONS:
+        return suffix.lstrip(".")
+    return suffix.lstrip(".") or "file"
+
+
+def text_preview(path: str) -> str:
+    file_path = Path(path)
+    if file_path.suffix.lower() not in TEXT_PREVIEW_EXTENSIONS:
+        return ""
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    text = text.strip()
+    if len(text) > MAX_TEXT_PREVIEW_CHARS:
+        return text[:MAX_TEXT_PREVIEW_CHARS] + "\n... [truncated]"
+    return text
+
+
+def image_data_url(path: str) -> str | None:
+    file_path = Path(path)
+    if file_path.suffix.lower() not in MULTIMODAL_IMAGE_EXTENSIONS:
+        return None
+    try:
+        if file_path.stat().st_size > MAX_MULTIMODAL_IMAGE_BYTES:
+            return None
+        mime_type = mimetypes.guess_type(file_path.name)[0] or "image/png"
+        encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+    except Exception:
+        return None
+
+
+def describe_files_block(title: str, paths: list[str]) -> str:
+    if not paths:
+        return f"{title}: none"
+    lines = [f"{title}:"]
+    for index, path in enumerate(paths, 1):
+        file_path = Path(path)
+        size_kb = 0.0
+        try:
+            size_kb = file_path.stat().st_size / 1024
+        except Exception:
+            pass
+        lines.append(
+            f"{index}. name={file_path.name}; kind={file_kind(path)}; "
+            f"size_kb={size_kb:.1f}; path={path}"
+        )
+        preview = text_preview(path)
+        if preview:
+            lines.append(f"   text_preview:\n```text\n{preview}\n```")
+    return "\n".join(lines)
+
+
+def build_multimodal_review_content(
+    raw_answer: str,
+    uploaded_paths: list[str],
+    output_paths: list[str],
+) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": (
+                "Review the agent's answer, user input files, and generated tool artifacts. "
+                "Use the attached images when available. Decide which generated artifacts are actually useful "
+                "for the frontend to display or offer as downloads.\n\n"
+                "Return exactly two blocks:\n"
+                "<Answer>你的最终中文回答。所有给用户看的解释都必须写在这个块里。不要列出本机路径；可以说明关键图像/文件会在回答底部提供。</Answer>\n"
+                "<Artifacts>{\"display\":[\"exact generated filename or path\"],"
+                "\"download\":[\"exact generated filename or path\"]}</Artifacts>\n\n"
+                "Rules:\n"
+                "- display: only generated images that are useful for visual inspection.\n"
+                "- download: only generated files that are useful to the user for verification, GIS, or reports.\n"
+                "- Do not include model weights, checkpoints, source files, or unhelpful intermediate artifacts.\n"
+                "- If two artifacts contain the same information, keep the clearer one.\n\n"
+                "In <Answer>, include a short section explaining the selected downloadable files. "
+                "For each file, describe what it contains and what the user can do with it "
+                "(for example GIS loading, quantitative checking, report archiving, or downstream analysis). "
+                "Do not merely repeat filenames.\n\n"
+                "Put <Artifacts> last. Do not write any user-facing explanation after </Artifacts>.\n\n"
+                f"Original agent answer:\n{raw_answer}\n\n"
+                f"{describe_files_block('User uploaded files', uploaded_paths)}\n\n"
+                f"{describe_files_block('Generated tool artifacts', output_paths)}"
+            ),
+        }
+    ]
+
+    for path in uploaded_paths:
+        data_url = image_data_url(path)
+        if data_url:
+            content.append({"type": "text", "text": f"User uploaded image: {Path(path).name}"})
+            content.append({"type": "image_url", "image_url": {"url": data_url, "detail": "low"}})
+
+    for path in output_paths:
+        data_url = image_data_url(path)
+        if data_url:
+            content.append({"type": "text", "text": f"Generated artifact image: {Path(path).name}"})
+            content.append({"type": "image_url", "image_url": {"url": data_url, "detail": "low"}})
+
+    return content
+
+
+def build_user_message_content(user_text: str, uploaded_paths: list[str]) -> str | list[dict[str, Any]]:
+    if not uploaded_paths:
+        return user_text
+    content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": (
+                f"{user_text}\n\n"
+                "The following uploaded files are available to tools and to you. "
+                "For image files, inspect the attached image content directly when deciding file roles "
+                "such as pre-disaster vs post-disaster:\n"
+                f"{describe_files_block('Uploaded files', uploaded_paths)}"
+            ),
+        }
+    ]
+    for path in uploaded_paths:
+        data_url = image_data_url(path)
+        if data_url:
+            content.append({"type": "text", "text": f"Uploaded image: {Path(path).name}"})
+            content.append({"type": "image_url", "image_url": {"url": data_url, "detail": "low"}})
+    return content
+
+
+def _artifact_refs(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        refs: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                refs.append(item)
+            elif isinstance(item, dict):
+                ref = item.get("path") or item.get("name") or item.get("file")
+                if ref:
+                    refs.append(str(ref))
+        return refs
+    return []
+
+
+def _match_artifact_paths(refs: list[str], output_paths: list[str]) -> list[str]:
+    matched: list[str] = []
+    by_name = {Path(path).name: path for path in output_paths}
+    by_lower_name = {Path(path).name.lower(): path for path in output_paths}
+    normalized = {_normalize_existing_file(path) or path: path for path in output_paths}
+    for ref in refs:
+        clean = ref.strip().strip("`'\" ")
+        path = _normalize_existing_file(clean)
+        candidate = normalized.get(path or clean) or by_name.get(clean) or by_lower_name.get(clean.lower())
+        if candidate and candidate not in matched:
+            matched.append(candidate)
+    return matched
+
+
+def extract_artifact_selection(text: str, output_paths: list[str]) -> tuple[list[str], list[str]] | None:
+    match = ARTIFACTS_RE.search(text or "")
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(1).strip())
+    except Exception:
+        return None
+    display_refs = _artifact_refs(data.get("display") or data.get("images") or data.get("show"))
+    download_refs = _artifact_refs(data.get("download") or data.get("files") or data.get("downloads"))
+    display_candidates = _match_artifact_paths(display_refs, output_paths)
+    download_candidates = _match_artifact_paths(download_refs, output_paths)
+
+    display: list[str] = []
+    download: list[str] = []
+    for path in display_candidates:
+        if Path(path).suffix.lower() in IMAGE_EXTENSIONS:
+            display.append(path)
+        elif path not in download:
+            download.append(path)
+    for path in download_candidates:
+        if path not in display and path not in download:
+            download.append(path)
+    return display, download
+
+
+def choose_frontend_artifacts(answer_text: str, output_paths: list[str]) -> tuple[list[str], list[str]]:
+    selection = extract_artifact_selection(answer_text, output_paths)
+    if selection is not None:
+        return selection
+    return split_output_files(output_paths)
 
 
 def build_messages(history: list[dict[str, str]], system_prompt: str | None) -> list:
@@ -264,6 +491,15 @@ def extract_tool_output_files(response: dict) -> list[str]:
 
     def add_path(value: str) -> None:
         path = _normalize_existing_file(value)
+        if path:
+            file_path = Path(path)
+            if file_path.suffix.lower() in EXCLUDED_ARTIFACT_EXTENSIONS:
+                return
+            try:
+                file_path.relative_to(PROJECT_ROOT / "model")
+                return
+            except ValueError:
+                pass
         if path and path not in found:
             found.append(path)
 
@@ -292,17 +528,129 @@ def extract_tool_output_files(response: dict) -> list[str]:
     return found
 
 
+def extract_tool_legend(response: dict) -> list[dict[str, Any]]:
+    """Collect color legend entries returned by tools."""
+    legend: list[dict[str, Any]] = []
+
+    def add_entries(value: Any) -> None:
+        items = value.values() if isinstance(value, dict) and "label" not in value else value
+        if isinstance(items, dict):
+            items = [items]
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label") or item.get("meaning") or item.get("name")
+            color = item.get("color")
+            if label and color:
+                entry = {
+                    "label": str(label),
+                    "color": str(color),
+                    "value": item.get("value"),
+                }
+                if entry not in legend:
+                    legend.append(entry)
+
+    def visit(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key == "legend":
+                    add_entries(value)
+                else:
+                    visit(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                visit(item)
+        elif isinstance(obj, str):
+            try:
+                visit(json.loads(obj))
+            except Exception:
+                pass
+
+    for msg in response.get("messages", []):
+        if isinstance(msg, ToolMessage):
+            visit(msg.content)
+    return legend
+
+
 def split_output_files(paths: list[str]) -> tuple[list[str], list[str]]:
     images: list[str] = []
     files: list[str] = []
     for path in paths:
         name = Path(path).name.lower()
         suffix = Path(path).suffix.lower()
-        if suffix in IMAGE_EXTENSIONS and not any(marker in name for marker in MASK_OUTPUT_MARKERS):
+        if (
+            suffix in IMAGE_EXTENSIONS
+            and not any(marker in name for marker in MASK_OUTPUT_MARKERS)
+            and not any(marker in name for marker in DOWNLOAD_ONLY_IMAGE_MARKERS)
+        ):
             images.append(path)
         else:
             files.append(path)
     return images, files
+
+
+def extract_bbox_geojson_from_raster(path: str) -> str | None:
+    """Extract a WGS84 bbox GeoJSON from a georeferenced raster."""
+    try:
+        from osgeo import gdal, osr
+
+        ds = gdal.Open(path)
+        if ds is None:
+            return None
+        geo = ds.GetGeoTransform()
+        proj = ds.GetProjection()
+        width, height = ds.RasterXSize, ds.RasterYSize
+        ds = None
+        if geo == (0, 1.0, 0, 0, 0, 1.0):
+            return None
+
+        def pixel_to_map(px: float, py: float) -> tuple[float, float]:
+            return (
+                geo[0] + px * geo[1] + py * geo[2],
+                geo[3] + px * geo[4] + py * geo[5],
+            )
+
+        coords = [
+            pixel_to_map(0, 0),
+            pixel_to_map(width, 0),
+            pixel_to_map(width, height),
+            pixel_to_map(0, height),
+            pixel_to_map(0, 0),
+        ]
+
+        def looks_like_lonlat(points: list[tuple[float, float]]) -> bool:
+            return all(-180 <= x <= 180 and -90 <= y <= 90 for x, y in points)
+
+        if proj and not looks_like_lonlat(coords):
+            source = osr.SpatialReference()
+            if source.ImportFromWkt(proj) == 0:
+                target = osr.SpatialReference()
+                target.ImportFromEPSG(4326)
+                if hasattr(source, "SetAxisMappingStrategy"):
+                    source.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+                    target.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+                transform = osr.CoordinateTransformation(source, target)
+                transformed = []
+                for x, y in coords:
+                    lon, lat, *_ = transform.TransformPoint(x, y)
+                    transformed.append((lon, lat))
+                coords = transformed
+
+        return json.dumps({
+            "type": "Polygon",
+            "coordinates": [[list(point) for point in coords]],
+        })
+    except Exception:
+        return None
+
+
+def extract_first_output_geometry(paths: list[str]) -> str | None:
+    for path in paths:
+        if Path(path).suffix.lower() in {".tif", ".tiff"}:
+            geom = extract_bbox_geojson_from_raster(path)
+            if geom:
+                return geom
+    return None
 
 
 def substitute_env(value: str) -> str:
@@ -387,9 +735,9 @@ class AgentHandle:
             )
             tools = await client.get_tools()
             agent = create_react_agent(llm, tools)
-            return agent, client, tools
+            return agent, llm, client, tools
 
-        self.agent, self.client, self.tools = self.run(setup())
+        self.agent, self.llm, self.client, self.tools = self.run(setup())
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self.loop)
@@ -405,6 +753,37 @@ class AgentHandle:
             return await self.agent.ainvoke({"messages": messages}, config=config or {})
 
         return self.run(run_agent())
+
+    def review_answer_and_artifacts(
+        self,
+        raw_answer: str,
+        uploaded_paths: list[str],
+        output_paths: list[str],
+    ) -> str:
+        if not output_paths and not uploaded_paths:
+            return raw_answer
+
+        async def run_review():
+            messages = [
+                SystemMessage(
+                    content=(
+                        "You are a careful geospatial result reviewer. Use multimodal image understanding "
+                        "when images are attached. Improve the final Chinese answer and select only useful "
+                        "generated artifacts for display/download. Never expose local absolute paths to users."
+                    )
+                ),
+                HumanMessage(
+                    content=build_multimodal_review_content(raw_answer, uploaded_paths, output_paths)
+                ),
+            ]
+            result = await self.llm.ainvoke(messages)
+            return message_content_text(getattr(result, "content", ""))
+
+        try:
+            reviewed = self.run(run_review())
+        except Exception:
+            return raw_answer
+        return reviewed or raw_answer
 
     def stream(self, messages: list, config: dict | None = None):
         output_queue: queue.Queue[Any] = queue.Queue()
@@ -684,6 +1063,22 @@ def get_session_assessments(session_id: str) -> dict[str, Any]:
     return {"session_id": session_id, "assessments": [_serialize_assessment(r) for r in rows]}
 
 
+@app.get("/api/sessions/{session_id}/latest-geometry")
+def get_session_latest_geometry(session_id: str) -> dict[str, Any]:
+    """返回某会话最新的空间范围, 用于前端地图自动定位。"""
+    rows = db.query_assessments(session_id=session_id, limit=20)
+    for row in rows:
+        if row.get("geom_geojson"):
+            assessment = _serialize_assessment(row)
+            return {
+                "session_id": session_id,
+                "found": True,
+                "assessment": assessment,
+                "geom": assessment["geom"],
+            }
+    return {"session_id": session_id, "found": False, "assessment": None, "geom": None}
+
+
 @app.get("/api/assessments")
 def list_assessments(task: str = "", limit: int = 50) -> dict[str, Any]:
     """全局评估结果列表 (可按 task 过滤)"""
@@ -758,7 +1153,10 @@ def chat(
                     "Uploaded files:\n" + "\n".join(f"- `{path}`" for path in uploaded_paths)
                 )
             user_content = "\n\n".join(content_parts) or "Please analyze the uploaded file(s)."
-            session.messages.append({"role": "user", "content": user_content})
+            session.messages.append({
+                "role": "user",
+                "content": build_user_message_content(user_content, uploaded_paths),
+            })
 
             # Persist session + user message to DB (upsert; idempotent)
             db.create_session(
@@ -793,14 +1191,21 @@ def chat(
             )
             elapsed = time.time() - started
             raw_answer = last_ai_message(response)
-            final_answer = extract_final_answer(raw_answer)
-            display_answer = sanitize_display_answer(final_answer or raw_answer)
             trace = tool_trace(response)
             output_paths = extract_tool_output_files(response)
-            images, output_files = split_output_files(output_paths)
+            reviewed_answer = session.handle.review_answer_and_artifacts(
+                raw_answer,
+                uploaded_paths,
+                output_paths,
+            )
+            final_answer = extract_final_answer(reviewed_answer)
+            display_answer = sanitize_display_answer(final_answer or reviewed_answer)
+            images, output_files = choose_frontend_artifacts(reviewed_answer, output_paths)
+            geometry = extract_first_output_geometry(output_paths)
+            legend = extract_tool_legend(response)
 
             session.messages.append(
-                {"role": "assistant", "content": final_answer or raw_answer}
+                {"role": "assistant", "content": final_answer or reviewed_answer or raw_answer}
             )
             # 读取输出图片的二进制数据
             image_files: list[dict] = []
@@ -819,7 +1224,7 @@ def chat(
             db.save_chat_message(
                 session_id,
                 "assistant",
-                content=final_answer or raw_answer,
+                content=final_answer or reviewed_answer or raw_answer,
                 display_content=display_answer,
                 attachments=[_file_descriptor(p) for p in output_files],
                 images=[_image_descriptor(p) for p in images],
@@ -835,6 +1240,8 @@ def chat(
                 "tool_calls": len(trace),
                 "images": [file_payload(path) for path in images],
                 "files": [file_payload(path) for path in output_files],
+                "geometry": geometry,
+                "legend": legend,
                 "trace": trace if show_trace else [],
             }
         except Exception as exc:  # noqa: BLE001
@@ -846,6 +1253,8 @@ def chat(
                 "tool_calls": 0,
                 "images": [],
                 "files": [],
+                "geometry": None,
+                "legend": [],
                 "trace": [],
                 "error": error_text,
                 "memory_suggestions": [
@@ -894,7 +1303,10 @@ def chat_stream(
                 "Uploaded files:\n" + "\n".join(f"- `{path}`" for path in uploaded_paths)
             )
         user_content = "\n\n".join(content_parts) or "Please analyze the uploaded file(s)."
-        session.messages.append({"role": "user", "content": user_content})
+        session.messages.append({
+            "role": "user",
+            "content": build_user_message_content(user_content, uploaded_paths),
+        })
 
         # Persist session + user message to DB (upsert; idempotent)
         db.create_session(
@@ -946,16 +1358,23 @@ def chat_stream(
                     elapsed = time.time() - started
                     response = item["response"]
                     raw_answer = last_ai_message(response)
-                    final_answer = extract_final_answer(raw_answer)
-                    display_answer = sanitize_display_answer(
-                        final_answer or raw_answer or streamed_text
-                    )
                     trace = tool_trace(response)
                     output_paths = extract_tool_output_files(response)
-                    images, output_files = split_output_files(output_paths)
+                    reviewed_answer = session.handle.review_answer_and_artifacts(
+                        raw_answer or streamed_text,
+                        uploaded_paths,
+                        output_paths,
+                    )
+                    final_answer = extract_final_answer(reviewed_answer)
+                    display_answer = sanitize_display_answer(
+                        final_answer or reviewed_answer or raw_answer or streamed_text
+                    )
+                    images, output_files = choose_frontend_artifacts(reviewed_answer, output_paths)
+                    geometry = extract_first_output_geometry(output_paths)
+                    legend = extract_tool_legend(response)
 
                     session.messages.append(
-                        {"role": "assistant", "content": final_answer or raw_answer or streamed_text}
+                        {"role": "assistant", "content": final_answer or reviewed_answer or raw_answer or streamed_text}
                     )
                     # 读取输出图片的二进制数据
                     image_files: list[dict] = []
@@ -974,7 +1393,7 @@ def chat_stream(
                     db.save_chat_message(
                         session_id,
                         "assistant",
-                        content=final_answer or raw_answer or streamed_text,
+                        content=final_answer or reviewed_answer or raw_answer or streamed_text,
                         display_content=display_answer,
                         attachments=[_file_descriptor(p) for p in output_files],
                         images=[_image_descriptor(p) for p in images],
@@ -992,6 +1411,8 @@ def chat_stream(
                             "tool_calls": len(trace),
                             "images": [file_payload(path) for path in images],
                             "files": [file_payload(path) for path in output_files],
+                            "geometry": geometry,
+                            "legend": legend,
                             "trace": trace if show_trace else [],
                         },
                     )
@@ -1006,6 +1427,8 @@ def chat_stream(
                     "tool_calls": 0,
                     "images": [],
                     "files": [],
+                    "geometry": None,
+                    "legend": [],
                     "trace": [],
                     "error": error_text,
                     "memory_suggestions": [
