@@ -136,7 +136,7 @@ function outputFileLabel(name = '') {
   if (lower.includes('landslide_mask')) return '滑坡区域掩膜图片'
   if (lower.includes('oil_vis')) return '海面溢油叠加可视化图'
   if (lower.includes('oil_mask')) return '海面溢油掩膜图片'
-  if (lower.includes('pest_vis')) return '农作物害虫检测框图'
+  if (lower.includes('pest_vis')) return '受害植株/区域检测框图'
   if (lower === 'summary.json' || lower.endsWith('_summary.json')) return '摘要报告 JSON'
   if (lower.endsWith('.geojson')) return '矢量结果 GeoJSON'
   if (lower.endsWith('.tif') || lower.endsWith('.tiff')) return 'GeoTIFF 栅格结果'
