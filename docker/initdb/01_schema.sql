@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     attachments      JSONB,
     images           JSONB,
     tool_trace       JSONB,
+    legend           JSONB,   -- [{label, color, value}] 模型输出图例
     elapsed_seconds  DOUBLE PRECISION,
     tool_call_count  INTEGER,
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),

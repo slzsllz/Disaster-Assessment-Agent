@@ -272,14 +272,24 @@ function mapApiMessage(m) {
     error: '',
     images: (m.images || []).map((img) => ({ name: img.name || 'image', url: img.url })),
     legend: m.legend || [],
-    attachments: (m.attachments || []).map((a) => ({
-      id: a.url || a.name || a.path || 'file',
-      name: a.name || 'file',
-      size: a.size || 0,
-      type: a.type || '',
-      url: a.url || '',
-      preview: '',
-    })),
+    attachments: (m.attachments || []).map((a) => {
+      const name = a.name || 'file'
+      const url = a.url || ''
+      const ext = name.split('.').pop().toLowerCase()
+      const isImage = a.type
+        ? previewableImageTypes.has(a.type)
+        : ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff'].includes(ext)
+      // 只有用户上传的图片才显示预览；模型输出文件保持下载按钮
+      const preview = m.role === 'user' && isImage ? url : ''
+      return {
+        id: url || name || a.path || 'file',
+        name,
+        size: a.size || 0,
+        type: a.type || '',
+        url,
+        preview,
+      }
+    }),
   }
 }
 

@@ -988,10 +988,24 @@ def _serialize_message(row: dict) -> dict[str, Any]:
             else:
                 attachments.append(item)
 
+    raw_content = row.get("content") or ""
+    display_content = row.get("display_content")
+    if display_content is not None:
+        rendered_content = display_content
+    elif row["role"] == "user":
+        # 旧数据没有 display_content，去掉后端自动追加的 Uploaded files 路径块
+        rendered_content = re.sub(
+            r"\n?\n?Uploaded files:\n(?:- `[^`]+`\n?)+",
+            "",
+            raw_content,
+        ).strip()
+    else:
+        rendered_content = raw_content
+
     return {
         "id": row["id"],
         "role": row["role"],
-        "content": row.get("display_content") or row.get("content") or "",
+        "content": rendered_content,
         "attachments": attachments,
         "images": images,
         "tool_trace": row.get("tool_trace") or [],
@@ -1170,6 +1184,7 @@ def chat(
                 session_id,
                 "user",
                 content=user_content,
+                display_content=message.strip(),
                 attachments=[{"name": Path(p).name, "path": p} for p in uploaded_paths],
                 attachment_files=attachment_files,
             )
@@ -1320,6 +1335,7 @@ def chat_stream(
             session_id,
             "user",
             content=user_content,
+            display_content=message.strip(),
             attachments=[{"name": Path(p).name, "path": p} for p in uploaded_paths],
             attachment_files=attachment_files,
         )
