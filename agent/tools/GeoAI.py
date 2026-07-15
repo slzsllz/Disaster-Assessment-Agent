@@ -5,8 +5,6 @@ Supported models (stored in model/GeoAIModels/):
   - car_detection_usa.pth            (MaskRCNN, 3-channel, car detection)
   - ship_detection.pth               (MaskRCNN, 3-channel, ship detection)
   - solar_panel_detection.pth        (MaskRCNN, 3-channel, solar panel detection)
-  - building_footprints_usa.pth      (MaskRCNN, 3-channel, building footprints)
-  - building_footprints_usa_rgbn.pth (MaskRCNN, 4-channel RGBN, building footprints)
   - wetland_detection.pth            (MaskRCNN, 4-channel RGBN, wetland detection)
   - water_detection.pth              (MaskRCNN, 4-channel RGBN, water detection)
   - water_detection_unet_best_model.pth (UNet/ResNet34, 3-channel, water segmentation)
@@ -69,18 +67,6 @@ DETECTION_MODELS: Dict[str, Dict[str, Any]] = {
         "detector_class": "SolarPanelDetector",
         "channels": 3,
         "description": "solar panel detection",
-    },
-    "building": {
-        "file": "building_footprints_usa.pth",
-        "detector_class": "BuildingFootprintExtractor",
-        "channels": 3,
-        "description": "building footprint extraction (RGB)",
-    },
-    "building_rgbn": {
-        "file": "building_footprints_usa_rgbn.pth",
-        "detector_class": "BuildingFootprintExtractor",
-        "channels": 4,
-        "description": "building footprint extraction (RGBN)",
     },
     "wetland": {
         "file": "wetland_detection.pth",
@@ -600,8 +586,6 @@ Supported tasks:
   - "car"             : detect cars (3-band RGB)
   - "ship"            : detect ships (3-band RGB)
   - "solar_panel"     : detect solar panels (3-band RGB)
-  - "building"        : extract building footprints (3-band RGB)
-  - "building_rgbn"   : extract building footprints (4-band RGBN)
   - "wetland"         : detect wetlands (4-band RGBN)
   - "water"           : detect water bodies (4-band RGBN)
 
@@ -622,7 +606,7 @@ Returns:
 
 def geoai_object_detection(
     raster_path: str,
-    task: str = "building",
+    task: str = "car",
     output_dir: str = "geoai_detection",
     confidence_threshold: float = 0.5,
     batch_size: int = 4,
@@ -1052,7 +1036,7 @@ if __name__ == "__main__":
     # detect
     p_det = sub.add_parser("detect", help="Object detection")
     p_det.add_argument("--raster", type=str, required=True)
-    p_det.add_argument("--task", type=str, default="building",
+    p_det.add_argument("--task", type=str, default="car",
                        choices=list(DETECTION_MODELS.keys()))
     p_det.add_argument("--output", type=str, default="geoai_detection")
     p_det.add_argument("--confidence", type=float, default=0.5)
