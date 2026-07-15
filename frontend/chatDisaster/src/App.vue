@@ -3,6 +3,7 @@ import { Bottom, Document, Edit, Plus, Top } from '@element-plus/icons-vue'
 import { ElSlider } from 'element-plus'
 import 'element-plus/es/components/slider/style/css'
 import { computed, nextTick, onMounted, ref } from 'vue'
+import watermarkUrl from './assets/team.png'
 import logoUrl from './assets/szu-logo.png'
 
 const systemPrompt = ref(
@@ -906,7 +907,7 @@ onMounted(async () => {
     </aside>
 
     <section class="chat-pane">
-      <img class="watermark" :src="logoUrl" alt="" aria-hidden="true" />
+      <img class="watermark" :src="watermarkUrl" alt="" aria-hidden="true" />
 
       <header class="chat-header">
         <div>
@@ -925,6 +926,8 @@ onMounted(async () => {
           </button>
         </div>
       </header>
+
+      <img class="corner-logo" :src="logoUrl" alt="深圳大学" />
 
       <div ref="chatContentRef" class="chat-content" @scroll="updateScrollBottomButton">
         <section v-if="!hasMessages" class="empty-state">

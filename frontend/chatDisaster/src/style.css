@@ -447,19 +447,30 @@ input[type="checkbox"] {
   top: 50%;
   width: min(42vw, 500px);
   transform: translate(-50%, -50%);
-  opacity: 0.055;
+  opacity: 0.25;
   pointer-events: none;
   user-select: none;
   z-index: 0;
 }
 
+.corner-logo {
+  position: absolute;
+  top: 5.15rem;
+  right: 2.35rem;
+  z-index: 2;
+  width: 4.25rem;
+  height: 4.25rem;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+}
+
 .chat-content {
   position: relative;
   z-index: 1;
-  width: min(1100px, 100%);
+  width: 100%;
   flex: 1 1 auto;
   min-height: 0;
-  margin: 0 auto;
   overflow: auto;
   scrollbar-width: none;
   padding: 1.25rem 0.35rem 1rem;
@@ -494,6 +505,8 @@ input[type="checkbox"] {
 }
 
 .message-row {
+  width: min(1100px, 100%);
+  margin: 0 auto;
   display: flex;
   align-items: flex-start;
   gap: 0.8rem;
@@ -990,6 +1003,13 @@ input[type="checkbox"] {
 
   .watermark {
     width: min(68vw, 400px);
+  }
+
+  .corner-logo {
+    top: 4.75rem;
+    right: 1rem;
+    width: 3.2rem;
+    height: 3.2rem;
   }
 
   .composer {
