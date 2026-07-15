@@ -801,6 +801,7 @@ onMounted(async () => {
     </button>
 
     <aside class="sidebar">
+      <img class="sidebar-logo" :src="logoUrl" alt="深圳大学" />
       <div class="sidebar-title">灾害检测智能体</div>
 
       <section class="sidebar-section">
@@ -926,8 +927,6 @@ onMounted(async () => {
           </button>
         </div>
       </header>
-
-      <img class="corner-logo" :src="logoUrl" alt="深圳大学" />
 
       <div ref="chatContentRef" class="chat-content" @scroll="updateScrollBottomButton">
         <section v-if="!hasMessages" class="empty-state">
