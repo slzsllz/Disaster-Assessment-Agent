@@ -194,7 +194,7 @@ button {
   background: #f7f7f8;
 }
 
-.amap-container {
+.arcgis-container {
   position: relative;
   width: 100%;
   min-height: 0;
