@@ -1008,6 +1008,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
         "content": rendered_content,
         "attachments": attachments,
         "images": images,
+        "legend": row.get("legend") or [],
         "tool_trace": row.get("tool_trace") or [],
         "elapsed_seconds": row.get("elapsed_seconds"),
         "tool_call_count": row.get("tool_call_count"),
@@ -1247,6 +1248,7 @@ def chat(
                 elapsed_seconds=elapsed,
                 tool_call_count=len(trace),
                 image_files=image_files,
+                legend=legend,
             )
 
             return {
@@ -1417,6 +1419,7 @@ def chat_stream(
                         elapsed_seconds=elapsed,
                         tool_call_count=len(trace),
                         image_files=image_files,
+                        legend=legend,
                     )
 
                     yield sse_event(
