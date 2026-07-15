@@ -1,4 +1,10 @@
 <script setup>
+import '@arcgis/core/assets/esri/themes/light/main.css'
+import esriConfig from '@arcgis/core/config'
+import Graphic from '@arcgis/core/Graphic'
+import GraphicsLayer from '@arcgis/core/layers/GraphicsLayer'
+import Map from '@arcgis/core/Map'
+import MapView from '@arcgis/core/views/MapView'
 import { Bottom, Document, Edit, Plus, Top } from '@element-plus/icons-vue'
 import { ElSlider } from 'element-plus'
 import 'element-plus/es/components/slider/style/css'
@@ -22,16 +28,15 @@ const sessionId = ref(crypto.randomUUID())
 const messages = ref([])
 const chatContentRef = ref(null)
 const showScrollBottom = ref(false)
-const amapContainerRef = ref(null)
-const amapMap = ref(null)
-const amapOverlays = ref([])
-const amapLoading = ref(false)
-const amapError = ref('')
+const arcgisContainerRef = ref(null)
+const arcgisView = ref(null)
+const arcgisGraphicsLayer = ref(null)
+const mapLoading = ref(false)
+const mapError = ref('')
 const mapViewMode = ref('standard')
 const activeMapAssessment = ref(null)
 const mapNotice = ref('暂无空间范围')
-const amapKey = import.meta.env.VITE_AMAP_KEY || ''
-const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE || ''
+const arcgisKey = import.meta.env.VITE_ARCGIS_API_KEY || ''
 
 const hasMessages = computed(() => messages.value.length > 0)
 
@@ -375,63 +380,25 @@ async function deleteConversation(conversation) {
   await fetchSessions()
 }
 
-function applyAmapLayer() {
-  if (!amapMap.value || !window.AMap) return
-  const AMap = window.AMap
-  if (mapViewMode.value === 'satellite') {
-    amapMap.value.setLayers([new AMap.TileLayer.Satellite()])
-  } else {
-    amapMap.value.setLayers([new AMap.TileLayer()])
-  }
+const ARCGIS_BASEMAPS = {
+  standard: 'arcgis/navigation',
+  satellite: 'arcgis/imagery',
+}
+
+function applyArcgisBasemap() {
+  if (!arcgisView.value?.map) return
+  arcgisView.value.map.basemap = ARCGIS_BASEMAPS[mapViewMode.value] || ARCGIS_BASEMAPS.standard
 }
 
 function setMapViewMode(mode) {
   mapViewMode.value = mode
-  applyAmapLayer()
+  applyArcgisBasemap()
 }
 
 function clearMapGeometry() {
-  if (amapMap.value && amapOverlays.value.length) {
-    amapMap.value.remove(amapOverlays.value)
-  }
-  amapOverlays.value = []
+  arcgisGraphicsLayer.value?.removeAll()
   activeMapAssessment.value = null
   mapNotice.value = '暂无空间范围'
-}
-
-function outOfChina(lng, lat) {
-  return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271
-}
-
-function transformLat(lng, lat) {
-  let ret = -100.0 + 2.0 * lng + 3.0 * lat + 0.2 * lat * lat + 0.1 * lng * lat + 0.2 * Math.sqrt(Math.abs(lng))
-  ret += ((20.0 * Math.sin(6.0 * lng * Math.PI) + 20.0 * Math.sin(2.0 * lng * Math.PI)) * 2.0) / 3.0
-  ret += ((20.0 * Math.sin(lat * Math.PI) + 40.0 * Math.sin((lat / 3.0) * Math.PI)) * 2.0) / 3.0
-  ret += ((160.0 * Math.sin((lat / 12.0) * Math.PI) + 320 * Math.sin((lat * Math.PI) / 30.0)) * 2.0) / 3.0
-  return ret
-}
-
-function transformLng(lng, lat) {
-  let ret = 300.0 + lng + 2.0 * lat + 0.1 * lng * lng + 0.1 * lng * lat + 0.1 * Math.sqrt(Math.abs(lng))
-  ret += ((20.0 * Math.sin(6.0 * lng * Math.PI) + 20.0 * Math.sin(2.0 * lng * Math.PI)) * 2.0) / 3.0
-  ret += ((20.0 * Math.sin(lng * Math.PI) + 40.0 * Math.sin((lng / 3.0) * Math.PI)) * 2.0) / 3.0
-  ret += ((150.0 * Math.sin((lng / 12.0) * Math.PI) + 300.0 * Math.sin((lng / 30.0) * Math.PI)) * 2.0) / 3.0
-  return ret
-}
-
-function wgs84ToGcj02(lng, lat) {
-  if (outOfChina(lng, lat)) return [lng, lat]
-  const a = 6378245.0
-  const ee = 0.00669342162296594323
-  let dLat = transformLat(lng - 105.0, lat - 35.0)
-  let dLng = transformLng(lng - 105.0, lat - 35.0)
-  const radLat = (lat / 180.0) * Math.PI
-  let magic = Math.sin(radLat)
-  magic = 1 - ee * magic * magic
-  const sqrtMagic = Math.sqrt(magic)
-  dLat = (dLat * 180.0) / (((a * (1 - ee)) / (magic * sqrtMagic)) * Math.PI)
-  dLng = (dLng * 180.0) / ((a / sqrtMagic) * Math.cos(radLat) * Math.PI)
-  return [lng + dLng, lat + dLat]
 }
 
 function geometryToRings(geom) {
@@ -449,7 +416,7 @@ function geometryToRings(geom) {
 async function drawAssessmentGeometry(assessment) {
   if (!assessment?.geom) return false
   await openMapDrawer()
-  if (!amapMap.value || !window.AMap) return false
+  if (!arcgisView.value || !arcgisGraphicsLayer.value) return false
 
   let rings = []
   try {
@@ -460,30 +427,35 @@ async function drawAssessmentGeometry(assessment) {
   }
   if (!rings.length) return false
 
-  if (amapOverlays.value.length) {
-    amapMap.value.remove(amapOverlays.value)
-  }
+  arcgisGraphicsLayer.value.removeAll()
 
-  const AMap = window.AMap
-  const polygons = rings
+  const graphics = rings
     .map((ring) => ring
       .filter((point) => Array.isArray(point) && point.length >= 2)
-      .map(([lng, lat]) => wgs84ToGcj02(Number(lng), Number(lat))))
+      .map(([lng, lat]) => [Number(lng), Number(lat)]))
     .filter((ring) => ring.length >= 3)
-    .map((path) => new AMap.Polygon({
-      path,
-      strokeColor: '#ef4444',
-      strokeWeight: 2,
-      strokeOpacity: 0.95,
-      fillColor: '#ef4444',
-      fillOpacity: 0.18,
-      zIndex: 80,
+    .map((ring) => new Graphic({
+      geometry: {
+        type: 'polygon',
+        rings: [ring],
+        spatialReference: { wkid: 4326 },
+      },
+      symbol: {
+        type: 'simple-fill',
+        color: [239, 68, 68, 0.18],
+        outline: {
+          color: [239, 68, 68, 0.95],
+          width: 2,
+        },
+      },
     }))
 
-  if (!polygons.length) return false
-  amapMap.value.add(polygons)
-  amapMap.value.setFitView(polygons, false, [48, 48, 48, 48])
-  amapOverlays.value = polygons
+  if (!graphics.length) return false
+  arcgisGraphicsLayer.value.addMany(graphics)
+  await arcgisView.value.goTo(graphics, {
+    duration: 600,
+    padding: { top: 48, right: 48, bottom: 48, left: 48 },
+  }).catch(() => {})
   activeMapAssessment.value = assessment
   mapNotice.value = `${assessment.task || '分析结果'} 空间范围`
   return true
@@ -501,69 +473,43 @@ async function showLatestSessionGeometry() {
   }
 }
 
-function loadAmapScript() {
-  if (window.AMap) return Promise.resolve(window.AMap)
-  if (!amapKey) return Promise.reject(new Error('缺少 VITE_AMAP_KEY，请在前端环境变量中配置高德 Web JS API Key。'))
+async function initArcgisMap() {
+  if (arcgisView.value || mapLoading.value) return
 
-  if (amapSecurityCode) {
-    window._AMapSecurityConfig = {
-      securityJsCode: amapSecurityCode,
-    }
-  }
-
-  const existingScript = document.querySelector('script[data-amap-sdk="true"]')
-  if (existingScript) {
-    return new Promise((resolve, reject) => {
-      existingScript.addEventListener('load', () => resolve(window.AMap), { once: true })
-      existingScript.addEventListener('error', () => reject(new Error('高德地图 SDK 加载失败。')), {
-        once: true,
-      })
-    })
-  }
-
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script')
-    script.dataset.amapSdk = 'true'
-    script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(amapKey)}&plugin=AMap.Scale,AMap.ToolBar`
-    script.async = true
-    script.onload = () => resolve(window.AMap)
-    script.onerror = () => reject(new Error('高德地图 SDK 加载失败，请检查网络或 Key 配置。'))
-    document.head.appendChild(script)
-  })
-}
-
-async function initAmap() {
-  if (amapMap.value || amapLoading.value) return
-
-  amapLoading.value = true
-  amapError.value = ''
+  mapLoading.value = true
+  mapError.value = ''
   try {
-    const AMap = await loadAmapScript()
+    if (!arcgisKey) {
+      throw new Error('缺少 VITE_ARCGIS_API_KEY，请在前端环境变量中配置 ArcGIS API Key。')
+    }
+    esriConfig.apiKey = arcgisKey
     await nextTick()
-    if (!amapContainerRef.value) return
+    if (!arcgisContainerRef.value) return
 
-    amapMap.value = new AMap.Map(amapContainerRef.value, {
-      zoom: 4,
-      center: [104.1954, 35.8617],
-      viewMode: '2D',
-      resizeEnable: true,
+    arcgisGraphicsLayer.value = new GraphicsLayer()
+    const map = new Map({
+      basemap: ARCGIS_BASEMAPS[mapViewMode.value],
+      layers: [arcgisGraphicsLayer.value],
     })
-    amapMap.value.addControl(new AMap.Scale())
-    amapMap.value.addControl(new AMap.ToolBar({ position: 'RB' }))
-    applyAmapLayer()
+    arcgisView.value = new MapView({
+      container: arcgisContainerRef.value,
+      map,
+      center: [104.1954, 35.8617],
+      zoom: 3,
+    })
   } catch (error) {
-    amapError.value = error.message || String(error)
+    mapError.value = error.message || String(error)
   } finally {
-    amapLoading.value = false
+    mapLoading.value = false
   }
 }
 
 async function openMapDrawer() {
   mapDrawerOpen.value = true
   await nextTick()
-  await initAmap()
+  await initArcgisMap()
   nextTick(() => {
-    amapMap.value?.resize()
+    arcgisView.value?.resize()
   })
 }
 
@@ -801,6 +747,7 @@ onMounted(async () => {
     </button>
 
     <aside class="sidebar">
+      <img class="sidebar-logo" :src="logoUrl" alt="深圳大学" />
       <div class="sidebar-title">灾害检测智能体</div>
 
       <section class="sidebar-section">
@@ -896,9 +843,9 @@ onMounted(async () => {
       </header>
 
       <div class="map-panel">
-        <div v-if="amapLoading" class="map-state">地图加载中...</div>
-        <div v-else-if="amapError" class="map-state error">{{ amapError }}</div>
-        <div v-show="!amapLoading && !amapError" ref="amapContainerRef" class="amap-container" />
+        <div v-if="mapLoading" class="map-state">地图加载中...</div>
+        <div v-else-if="mapError" class="map-state error">{{ mapError }}</div>
+        <div v-show="!mapLoading && !mapError" ref="arcgisContainerRef" class="arcgis-container" />
       </div>
 
       <footer class="map-drawer-footer">
@@ -926,8 +873,6 @@ onMounted(async () => {
           </button>
         </div>
       </header>
-
-      <img class="corner-logo" :src="logoUrl" alt="深圳大学" />
 
       <div ref="chatContentRef" class="chat-content" @scroll="updateScrollBottomButton">
         <section v-if="!hasMessages" class="empty-state">

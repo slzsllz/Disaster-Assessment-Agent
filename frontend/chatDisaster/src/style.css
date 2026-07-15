@@ -36,7 +36,7 @@ button {
 .app-shell {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 340px minmax(0, 1fr);
+  grid-template-columns: 380px minmax(0, 1fr);
   background: #ffffff;
   transition: grid-template-columns 0.22s ease;
 }
@@ -77,8 +77,9 @@ button {
 }
 
 .sidebar {
+  position: relative;
   min-height: 100vh;
-  width: 340px;
+  width: 380px;
   padding: 4.5rem 1rem 1.25rem;
   border-right: 1px solid #e5e5e5;
   background: #f7f7f8;
@@ -93,6 +94,17 @@ button {
   transform: translateX(-100%);
   opacity: 0;
   pointer-events: none;
+}
+
+.sidebar-logo {
+  position: absolute;
+  top: 0.9rem;
+  right: 1rem;
+  width: 4.2rem;
+  height: 4.2rem;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
 }
 
 .map-drawer {
@@ -182,7 +194,7 @@ button {
   background: #f7f7f8;
 }
 
-.amap-container {
+.arcgis-container {
   position: relative;
   width: 100%;
   min-height: 0;
@@ -226,8 +238,9 @@ button {
 }
 
 .sidebar-title {
+  width: calc(100% - 4.9rem);
   margin-bottom: 1rem;
-  font-size: 1.28rem;
+  font-size: 1.42rem;
   font-weight: 700;
 }
 
@@ -255,7 +268,7 @@ button {
 
 input[type="radio"],
 input[type="checkbox"] {
-  accent-color: #2e7d32;
+  accent-color: #409eff;
 }
 
 .slider-label {
@@ -268,13 +281,13 @@ input[type="checkbox"] {
 }
 
 .slider-label strong {
-  color: #2e7d32;
+  color: #409eff;
   font-weight: 600;
 }
 
 .sidebar-section .el-slider {
-  --el-slider-main-bg-color: #2e7d32;
-  --el-slider-runway-bg-color: #e2e7df;
+  --el-slider-main-bg-color: #409eff;
+  --el-slider-runway-bg-color: #e4e7ed;
   --el-slider-stop-bg-color: #ffffff;
   margin: 0.1rem 0 0.75rem;
 }
@@ -282,7 +295,7 @@ input[type="checkbox"] {
 .sidebar-section .el-slider__button {
   width: 0.8rem;
   height: 0.8rem;
-  border-color: #2e7d32;
+  border-color: #409eff;
 }
 
 .new-chat-button {
@@ -419,7 +432,7 @@ input[type="checkbox"] {
 .chat-header h1 {
   margin: 0;
   color: #202123;
-  font-size: 1.05rem;
+  font-size: 1.24rem;
   font-weight: 700;
   letter-spacing: 0;
 }
@@ -432,6 +445,9 @@ input[type="checkbox"] {
 
 .header-status {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
   padding: 0.32rem 0.62rem;
   border: 1px solid #e4e4e7;
   border-radius: 999px;
@@ -439,6 +455,15 @@ input[type="checkbox"] {
   color: #4f4f5f;
   font-size: 0.78rem;
   font-weight: 600;
+}
+
+.header-status::before {
+  content: "";
+  width: 0.48rem;
+  height: 0.48rem;
+  border-radius: 999px;
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.16);
 }
 
 .watermark {
@@ -451,18 +476,6 @@ input[type="checkbox"] {
   pointer-events: none;
   user-select: none;
   z-index: 0;
-}
-
-.corner-logo {
-  position: absolute;
-  top: 5.15rem;
-  right: 2.35rem;
-  z-index: 2;
-  width: 4.25rem;
-  height: 4.25rem;
-  object-fit: contain;
-  pointer-events: none;
-  user-select: none;
 }
 
 .chat-content {
@@ -1003,13 +1016,6 @@ input[type="checkbox"] {
 
   .watermark {
     width: min(68vw, 400px);
-  }
-
-  .corner-logo {
-    top: 4.75rem;
-    right: 1rem;
-    width: 3.2rem;
-    height: 3.2rem;
   }
 
   .composer {
