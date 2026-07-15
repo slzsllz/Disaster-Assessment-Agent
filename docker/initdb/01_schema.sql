@@ -44,13 +44,13 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     attachments      JSONB,
     images           JSONB,
     tool_trace       JSONB,
-    legend           JSONB,   -- [{label, color, value}] 模型输出图例
     elapsed_seconds  DOUBLE PRECISION,
     tool_call_count  INTEGER,
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),
     -- 二进制文件存储 (用户上传和模型输出)
     attachment_files JSONB,  -- [{name, mime_type, data_base64}]
-    image_files      JSONB   -- [{name, mime_type, data_base64}]
+    image_files      JSONB,  -- [{name, mime_type, data_base64}]
+    legend           JSONB   -- [{label, color}]
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
     ON chat_messages (session_id, created_at);

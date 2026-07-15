@@ -280,38 +280,71 @@ class Database:
         tool_call_count: int = None,
         attachment_files: list = None,
         image_files: list = None,
+        legend: list = None,
     ) -> Optional[int]:
         """保存一条聊天消息，返回消息 ID
 
         Args:
             attachment_files: 用户上传的附件文件二进制数据列表 [{name, mime_type, data}]
             image_files: 模型输出的图片二进制数据列表 [{name, mime_type, data}]
+            legend: 图例数据列表 [{label, color}]
         """
         if not self._ensure_pool():
             return None
         try:
             with self._conn() as conn, conn.cursor() as cur:
+                # 检查 legend 列是否存在，不存在则动态添加
                 cur.execute(
-                    """INSERT INTO chat_messages
-                       (session_id, role, content, display_content, attachments,
-                        images, tool_trace, elapsed_seconds, tool_call_count,
-                        attachment_files, image_files)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                       RETURNING id""",
-                    (
-                        session_id,
-                        role,
-                        content,
-                        display_content or None,
-                        Jsonb(attachments) if attachments else None,
-                        Jsonb(images) if images else None,
-                        Jsonb(tool_trace) if tool_trace else None,
-                        elapsed_seconds,
-                        tool_call_count,
-                        Jsonb(attachment_files) if attachment_files else None,
-                        Jsonb(image_files) if image_files else None,
-                    ),
+                    """SELECT column_name FROM information_schema.columns
+                       WHERE table_name = 'chat_messages' AND column_name = 'legend'"""
                 )
+                has_legend = cur.fetchone() is not None
+
+                if has_legend:
+                    cur.execute(
+                        """INSERT INTO chat_messages
+                           (session_id, role, content, display_content, attachments,
+                            images, tool_trace, elapsed_seconds, tool_call_count,
+                            attachment_files, image_files, legend)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           RETURNING id""",
+                        (
+                            session_id,
+                            role,
+                            content,
+                            display_content or None,
+                            Jsonb(attachments) if attachments else None,
+                            Jsonb(images) if images else None,
+                            Jsonb(tool_trace) if tool_trace else None,
+                            elapsed_seconds,
+                            tool_call_count,
+                            Jsonb(attachment_files) if attachment_files else None,
+                            Jsonb(image_files) if image_files else None,
+                            Jsonb(legend) if legend else None,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """INSERT INTO chat_messages
+                           (session_id, role, content, display_content, attachments,
+                            images, tool_trace, elapsed_seconds, tool_call_count,
+                            attachment_files, image_files)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           RETURNING id""",
+                        (
+                            session_id,
+                            role,
+                            content,
+                            display_content or None,
+                            Jsonb(attachments) if attachments else None,
+                            Jsonb(images) if images else None,
+                            Jsonb(tool_trace) if tool_trace else None,
+                            elapsed_seconds,
+                            tool_call_count,
+                            Jsonb(attachment_files) if attachment_files else None,
+                            Jsonb(image_files) if image_files else None,
+                        ),
+                    )
                 row = cur.fetchone()
                 # 维护 sessions 表的 message_count 和 updated_at
                 cur.execute(
