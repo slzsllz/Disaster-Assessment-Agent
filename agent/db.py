@@ -281,70 +281,62 @@ class Database:
         attachment_files: list = None,
         image_files: list = None,
         legend: list = None,
+        report_files: list = None,
     ) -> Optional[int]:
         """保存一条聊天消息，返回消息 ID
 
         Args:
-            attachment_files: 用户上传的附件文件二进制数据列表 [{name, mime_type, data}]
-            image_files: 模型输出的图片二进制数据列表 [{name, mime_type, data}]
+            attachment_files: 用户上传的附件文件二进制数据列表 [{name, mime_type, data_base64}]
+            image_files: 模型输出的图片二进制数据列表 [{name, mime_type, data_base64}]
             legend: 图例数据列表 [{label, color}]
+            report_files: AI 生成的 PDF 报告二进制数据列表 [{name, mime_type, data_base64}]
         """
         if not self._ensure_pool():
             return None
         try:
             with self._conn() as conn, conn.cursor() as cur:
-                # 检查 legend 列是否存在，不存在则动态添加
+                # 动态检测可选列 (legend / report_files)
                 cur.execute(
                     """SELECT column_name FROM information_schema.columns
-                       WHERE table_name = 'chat_messages' AND column_name = 'legend'"""
+                       WHERE table_name = 'chat_messages'
+                       AND column_name IN ('legend', 'report_files')"""
                 )
-                has_legend = cur.fetchone() is not None
+                optional_cols = {row[0] for row in cur.fetchall()}
 
-                if has_legend:
-                    cur.execute(
-                        """INSERT INTO chat_messages
-                           (session_id, role, content, display_content, attachments,
-                            images, tool_trace, elapsed_seconds, tool_call_count,
-                            attachment_files, image_files, legend)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                           RETURNING id""",
-                        (
-                            session_id,
-                            role,
-                            content,
-                            display_content or None,
-                            Jsonb(attachments) if attachments else None,
-                            Jsonb(images) if images else None,
-                            Jsonb(tool_trace) if tool_trace else None,
-                            elapsed_seconds,
-                            tool_call_count,
-                            Jsonb(attachment_files) if attachment_files else None,
-                            Jsonb(image_files) if image_files else None,
-                            Jsonb(legend) if legend else None,
-                        ),
-                    )
-                else:
-                    cur.execute(
-                        """INSERT INTO chat_messages
-                           (session_id, role, content, display_content, attachments,
-                            images, tool_trace, elapsed_seconds, tool_call_count,
-                            attachment_files, image_files)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                           RETURNING id""",
-                        (
-                            session_id,
-                            role,
-                            content,
-                            display_content or None,
-                            Jsonb(attachments) if attachments else None,
-                            Jsonb(images) if images else None,
-                            Jsonb(tool_trace) if tool_trace else None,
-                            elapsed_seconds,
-                            tool_call_count,
-                            Jsonb(attachment_files) if attachment_files else None,
-                            Jsonb(image_files) if image_files else None,
-                        ),
-                    )
+                base_cols = [
+                    "session_id", "role", "content", "display_content", "attachments",
+                    "images", "tool_trace", "elapsed_seconds", "tool_call_count",
+                    "attachment_files", "image_files",
+                ]
+                base_vals = [
+                    session_id,
+                    role,
+                    content,
+                    display_content or None,
+                    Jsonb(attachments) if attachments else None,
+                    Jsonb(images) if images else None,
+                    Jsonb(tool_trace) if tool_trace else None,
+                    elapsed_seconds,
+                    tool_call_count,
+                    Jsonb(attachment_files) if attachment_files else None,
+                    Jsonb(image_files) if image_files else None,
+                ]
+
+                if "legend" in optional_cols:
+                    base_cols.append("legend")
+                    base_vals.append(Jsonb(legend) if legend else None)
+                if "report_files" in optional_cols:
+                    base_cols.append("report_files")
+                    base_vals.append(Jsonb(report_files) if report_files else None)
+
+                cols_sql = sql.SQL(", ").join(sql.Identifier(c) for c in base_cols)
+                placeholders = sql.SQL(", ").join(sql.Placeholder() * len(base_vals))
+                cur.execute(
+                    sql.SQL("INSERT INTO chat_messages ({}) VALUES ({}) RETURNING id").format(
+                        cols_sql, placeholders
+                    ),
+                    base_vals,
+                )
                 row = cur.fetchone()
                 # 维护 sessions 表的 message_count 和 updated_at
                 cur.execute(
@@ -359,6 +351,32 @@ class Database:
         except Exception as exc:  # noqa: BLE001
             logger.warning("save_chat_message failed: %s", exc)
             return None
+
+    def update_message_report_files(self, message_id: int, report_files: list) -> bool:
+        """更新某条消息的 report_files 字段（用于流式响应后异步生成 PDF 报告）"""
+        if not self._ensure_pool():
+            return False
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                # 确保 report_files 列存在
+                cur.execute(
+                    """SELECT column_name FROM information_schema.columns
+                       WHERE table_name = 'chat_messages' AND column_name = 'report_files'"""
+                )
+                if cur.fetchone() is None:
+                    cur.execute(
+                        "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS report_files JSONB"
+                    )
+                    conn.commit()
+                cur.execute(
+                    "UPDATE chat_messages SET report_files = %s WHERE id = %s",
+                    (Jsonb(report_files) if report_files else None, message_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("update_message_report_files failed: %s", exc)
+            return False
 
     def get_chat_messages(self, session_id: str) -> List[dict]:
         """获取会话的全部消息(按时间排序)"""
