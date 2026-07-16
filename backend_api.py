@@ -964,6 +964,261 @@ def maybe_generate_session_title(session_id: str, message: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# AI-powered PDF report generation -- after each conversation the LLM
+# summarises the answer into a structured report which is rendered as a
+# downloadable PDF using reportlab (with CJK font support).
+# ---------------------------------------------------------------------------
+import io as _io  # noqa: E402  (local import to avoid top-level clutter)
+from datetime import datetime as _datetime  # noqa: E402
+
+_CJK_FONT_REGISTERED = False
+
+
+def _ensure_cjk_font() -> str:
+    """Register the STSong-Light CJK font for reportlab (idempotent)."""
+    global _CJK_FONT_REGISTERED
+    if not _CJK_FONT_REGISTERED:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+        _CJK_FONT_REGISTERED = True
+    return "STSong-Light"
+
+
+def generate_report_content(
+    answer_text: str, user_question: str
+) -> tuple[str, str, list[dict[str, str]]] | None:
+    """Ask the LLM to produce a structured report from the conversation.
+
+    Returns ``(title, summary, sections)`` where *sections* is a list of
+    ``{"heading": ..., "content": ...}`` dicts, or ``None`` on failure.
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+
+        llm = ChatOpenAI(
+            model=MODEL_CONFIG["model_name"],
+            api_key=MODEL_CONFIG["api_key"] or "EMPTY",
+            base_url=MODEL_CONFIG["base_url"] or None,
+            temperature=0.3,
+            request_timeout=60,
+            extra_body=MODEL_CONFIG["generate_args"] or None,
+        )
+        prompt = (
+            "你是一个灾害评估报告生成助手。请根据以下用户问题与AI回答，生成一份结构化的评估报告。\n\n"
+            f"用户问题：\n{user_question[:2000]}\n\n"
+            f"AI回答：\n{answer_text[:4000]}\n\n"
+            "请返回纯JSON（不要包含```json标记或其他文字），格式如下：\n"
+            '{"title":"报告标题（简短，不超过20字）",'
+            '"summary":"报告简要说明（1-2句话，说明报告的主要内容和目的）",'
+            '"sections":[{"heading":"章节标题","content":"章节正文（可含多段，用\\n分隔）"}]}\n\n'
+            "要求：\n"
+            "1. 报告语言与对话语言一致（通常为中文）\n"
+            "2. 至少包含'分析概述'、'主要发现'、'结论与建议'三个章节\n"
+            "3. 内容基于AI回答，不要编造信息\n"
+            "4. 只返回JSON"
+        )
+        result = llm.invoke([
+            SystemMessage(content="你是一个专业的报告生成助手，只返回有效的JSON。"),
+            HumanMessage(content=prompt),
+        ])
+        raw = message_content_text(getattr(result, "content", "")).strip()
+        # Strip possible markdown fences
+        if raw.startswith("```"):
+            raw = raw.split("```", 2)
+            raw = raw[1] if len(raw) >= 2 else raw[0]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+        data = json.loads(raw)
+        title = str(data.get("title", "灾害评估报告")).strip()[:50]
+        summary = str(data.get("summary", "")).strip()
+        sections = []
+        for sec in data.get("sections", []):
+            heading = str(sec.get("heading", "")).strip()
+            content = str(sec.get("content", "")).strip()
+            if heading or content:
+                sections.append({"heading": heading, "content": content})
+        if not sections:
+            sections = [{"heading": "报告内容", "content": answer_text[:2000]}]
+        return title, summary, sections
+    except Exception:
+        return None
+
+
+def _escape_xml(text: str) -> str:
+    """Escape characters that are special in reportlab's Paragraph markup."""
+    return (
+        str(text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def render_pdf_report(
+    title: str,
+    summary: str,
+    sections: list[dict[str, str]],
+    user_question: str = "",
+) -> bytes | None:
+    """Render a structured report as a PDF using reportlab with CJK fonts."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.platypus import (
+            SimpleDocTemplate,
+            Paragraph,
+            Spacer,
+            HRFlowable,
+        )
+
+        font = _ensure_cjk_font()
+        buffer = _io.BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            leftMargin=25 * mm,
+            rightMargin=25 * mm,
+            topMargin=25 * mm,
+            bottomMargin=25 * mm,
+            title=title,
+        )
+
+        title_style = ParagraphStyle(
+            "ReportTitle",
+            fontName=font,
+            fontSize=20,
+            alignment=TA_CENTER,
+            spaceAfter=6 * mm,
+            leading=26,
+        )
+        meta_style = ParagraphStyle(
+            "ReportMeta",
+            fontName=font,
+            fontSize=9,
+            alignment=TA_CENTER,
+            textColor=colors.grey,
+            spaceAfter=4 * mm,
+        )
+        summary_style = ParagraphStyle(
+            "ReportSummary",
+            fontName=font,
+            fontSize=10,
+            alignment=TA_LEFT,
+            leading=16,
+            spaceAfter=6 * mm,
+            textColor=colors.HexColor("#333333"),
+            leftIndent=6 * mm,
+            rightIndent=6 * mm,
+        )
+        heading_style = ParagraphStyle(
+            "ReportHeading",
+            fontName=font,
+            fontSize=14,
+            alignment=TA_LEFT,
+            spaceBefore=8 * mm,
+            spaceAfter=3 * mm,
+            leading=18,
+            textColor=colors.HexColor("#1a1a1a"),
+        )
+        body_style = ParagraphStyle(
+            "ReportBody",
+            fontName=font,
+            fontSize=10,
+            alignment=TA_LEFT,
+            leading=16,
+            spaceAfter=2 * mm,
+        )
+
+        story: list[Any] = []
+        story.append(Paragraph(_escape_xml(title), title_style))
+        story.append(
+            Paragraph(
+                f"生成时间：{_datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                meta_style,
+            )
+        )
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc")))
+        story.append(Spacer(1, 4 * mm))
+
+        if summary:
+            story.append(Paragraph(_escape_xml(summary), summary_style))
+            story.append(Spacer(1, 2 * mm))
+
+        for section in sections:
+            heading = section.get("heading", "")
+            content = section.get("content", "")
+            if heading:
+                story.append(Paragraph(_escape_xml(heading), heading_style))
+            for para in content.split("\n"):
+                para = para.strip()
+                if para:
+                    story.append(Paragraph(_escape_xml(para), body_style))
+            story.append(Spacer(1, 2 * mm))
+
+        doc.build(story)
+        return buffer.getvalue()
+    except Exception:
+        return None
+
+
+def generate_and_store_pdf_report(
+    answer_text: str,
+    user_question: str,
+    session_id: str,
+    message_id: int | None = None,
+) -> dict[str, Any] | None:
+    """Generate a PDF report from the assistant answer and register it.
+
+    If *message_id* is provided the report binary is persisted to the DB via
+    ``db.update_message_report_files`` so that history reloads show the
+    report card.  Returns a dict suitable for the frontend ``report`` field,
+    or ``None`` on failure.
+    """
+    result = generate_report_content(answer_text, user_question)
+    if result is None:
+        # Fallback: generate a minimal report without LLM
+        title = "灾害评估报告"
+        summary = "基于对话内容自动生成的评估报告。"
+        sections = [{"heading": "分析结果", "content": answer_text[:3000]}]
+    else:
+        title, summary, sections = result
+
+    pdf_bytes = render_pdf_report(title, summary, sections, user_question)
+    if not pdf_bytes:
+        return None
+
+    file_id = uuid.uuid4().hex
+    safe_title = re.sub(r'[\\/:*?"<>|]', "_", title)[:40]
+    file_name = f"{safe_title}.pdf"
+    temp_path = TEMP_BASE / f"{file_id}_{file_name}"
+    temp_path.write_bytes(pdf_bytes)
+    FILES[file_id] = temp_path
+
+    report_description = summary or "基于本次对话生成的评估报告"
+    report_file_data = {
+        "name": file_name,
+        "mime_type": "application/pdf",
+        "data_base64": base64.b64encode(pdf_bytes).decode("utf-8"),
+        "description": report_description,
+    }
+
+    if message_id is not None:
+        db.update_message_report_files(message_id, [report_file_data])
+
+    return {
+        "url": f"/api/files/{file_id}",
+        "name": file_name,
+        "description": report_description,
+    }
+
+
+# ---------------------------------------------------------------------------
 # DB row serializers -- convert dict_row results to JSON-friendly dicts.
 # FastAPI handles datetime/UUID encoding; we only reshape images/assessments.
 # ---------------------------------------------------------------------------
@@ -1048,6 +1303,27 @@ def _serialize_message(row: dict) -> dict[str, Any]:
             else:
                 attachments.append(item)
 
+    # 处理 PDF 报告文件（从二进制字段读取，生成前端可访问的 URL）
+    report = None
+    report_files = row.get("report_files") or []
+    for rf in report_files:
+        if not isinstance(rf, dict):
+            continue
+        name = rf.get("name", "report.pdf")
+        data_b64 = rf.get("data_base64")
+        if data_b64:
+            file_id = uuid.uuid4().hex
+            data = base64.b64decode(data_b64)
+            temp_path = TEMP_BASE / f"{file_id}_{name}"
+            temp_path.write_bytes(data)
+            FILES[file_id] = temp_path
+            report = {
+                "url": f"/api/files/{file_id}",
+                "name": name,
+                "description": rf.get("description") or "基于本次对话生成的评估报告",
+            }
+            break
+
     raw_content = row.get("content") or ""
     display_content = row.get("display_content")
     if display_content is not None:
@@ -1073,6 +1349,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
         "elapsed_seconds": row.get("elapsed_seconds"),
         "tool_call_count": row.get("tool_call_count"),
         "created_at": row.get("created_at"),
+        "report": report,
     }
 
 
@@ -1303,7 +1580,7 @@ def chat(
                 except Exception:
                     pass
 
-            db.save_chat_message(
+            _msg_id = db.save_chat_message(
                 session_id,
                 "assistant",
                 content=final_answer or reviewed_answer or raw_answer,
@@ -1317,6 +1594,14 @@ def chat(
                 legend=legend,
             )
 
+            # 生成 PDF 报告
+            report = generate_and_store_pdf_report(
+                display_answer or final_answer or raw_answer,
+                message,
+                session_id,
+                message_id=_msg_id,
+            )
+
             return {
                 "answer": display_answer or "(empty response)",
                 "elapsed": elapsed,
@@ -1326,6 +1611,7 @@ def chat(
                 "geometry": geometry,
                 "legend": legend,
                 "trace": trace if show_trace else [],
+                "report": report,
             }
         except Exception as exc:  # noqa: BLE001
             error_text = "".join(traceback.format_exception(exc))
@@ -1427,6 +1713,10 @@ def chat_stream(
     def generate():
         started = time.time()
         streamed_text = ""
+        # 保存 final 块的上下文，用于 for 循环结束后生成 PDF 报告
+        _final_answer_text = ""
+        _final_msg_id: int | None = None
+        _final_user_question = message
         try:
             yield sse_event("status", {"message": "正在思考..."})
             for item in session.handle.stream(
@@ -1480,7 +1770,7 @@ def chat_stream(
                         except Exception:
                             pass
 
-                    db.save_chat_message(
+                    _final_msg_id = db.save_chat_message(
                         session_id,
                         "assistant",
                         content=final_answer or reviewed_answer or raw_answer or streamed_text,
@@ -1493,6 +1783,7 @@ def chat_stream(
                         image_files=image_files,
                         legend=legend,
                     )
+                    _final_answer_text = display_answer or final_answer or streamed_text
 
                     yield sse_event(
                         "done",
@@ -1507,6 +1798,18 @@ def chat_stream(
                             "trace": trace if show_trace else [],
                         },
                     )
+
+            # 对话结束后生成 PDF 报告
+            if _final_answer_text:
+                yield sse_event("status", {"message": "正在生成报告..."})
+                report = generate_and_store_pdf_report(
+                    _final_answer_text,
+                    _final_user_question,
+                    session_id,
+                    message_id=_final_msg_id,
+                )
+                if report:
+                    yield sse_event("report", report)
         except Exception as exc:  # noqa: BLE001
             error_text = "".join(traceback.format_exception(exc))
             matches = ERROR_MEMORY.lookup_all(error_text)

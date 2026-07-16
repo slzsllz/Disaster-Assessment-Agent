@@ -32,6 +32,21 @@ const mapNotice = ref('暂无空间范围')
 const amapKey = import.meta.env.VITE_AMAP_KEY || ''
 const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE || ''
 
+// PDF 报告预览
+const pdfPreviewVisible = ref(false)
+const pdfPreviewUrl = ref('')
+const pdfPreviewName = ref('')
+
+function openPdfPreview(report) {
+  pdfPreviewUrl.value = report.url
+  pdfPreviewName.value = report.name || 'report.pdf'
+  pdfPreviewVisible.value = true
+}
+
+function closePdfPreview() {
+  pdfPreviewVisible.value = false
+}
+
 const hasMessages = computed(() => messages.value.length > 0)
 
 // 按更新时间排序（从新到旧）
@@ -272,6 +287,7 @@ function mapApiMessage(m) {
     error: '',
     images: (m.images || []).map((img) => ({ name: img.name || 'image', url: img.url })),
     legend: m.legend || [],
+    report: m.report || null,
     attachments: (m.attachments || []).map((a) => {
       const name = a.name || 'file'
       const url = a.url || ''
@@ -671,6 +687,8 @@ function handleStreamBlock(block, assistantId) {
       drawAssessmentGeometry({ task: '当前分析结果', geom: payload.geometry })
     }
     message.error = ''
+  } else if (eventName === 'report') {
+    message.report = payload
   } else if (eventName === 'error') {
     message.content = payload.answer || '后端调用失败'
     message.meta = ''
@@ -737,6 +755,7 @@ async function sendMessage() {
         if (data.geometry) {
           await drawAssessmentGeometry({ task: '当前分析结果', geom: data.geometry })
         }
+        message.report = data.report || null
         message.error = data.error || ''
       }
       scrollToBottom()
@@ -1001,6 +1020,33 @@ onMounted(async () => {
                 <span>{{ item.label }}</span>
               </span>
             </div>
+            <div v-if="message.report" class="report-card">
+              <div class="report-card-icon">
+                <Document />
+              </div>
+              <div class="report-card-body">
+                <div class="report-card-title">评估报告 (PDF)</div>
+                <p class="report-card-desc">{{ message.report.description }}</p>
+              </div>
+              <div class="report-card-actions">
+                <button
+                  type="button"
+                  class="report-btn preview-btn"
+                  @click="openPdfPreview(message.report)"
+                >
+                  预览
+                </button>
+                <a
+                  class="report-btn download-btn"
+                  :href="message.report.url"
+                  :download="message.report.name"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  下载
+                </a>
+              </div>
+            </div>
           </div>
         </article>
       </div>
@@ -1048,5 +1094,28 @@ onMounted(async () => {
         </button>
       </form>
     </section>
+
+    <div v-if="pdfPreviewVisible" class="pdf-preview-overlay" @click.self="closePdfPreview">
+      <div class="pdf-preview-modal">
+        <header class="pdf-preview-header">
+          <span class="pdf-preview-name">{{ pdfPreviewName }}</span>
+          <div class="pdf-preview-actions">
+            <a
+              class="pdf-preview-download"
+              :href="pdfPreviewUrl"
+              :download="pdfPreviewName"
+              target="_blank"
+              rel="noreferrer"
+            >
+              下载
+            </a>
+            <button type="button" class="pdf-preview-close" @click="closePdfPreview">×</button>
+          </div>
+        </header>
+        <div class="pdf-preview-content">
+          <iframe :src="pdfPreviewUrl" :title="pdfPreviewName" />
+        </div>
+      </div>
+    </div>
   </main>
 </template>
