@@ -904,6 +904,66 @@ def sse_event(event: str, data: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# AI session title summarization -- prevent long user input from producing
+# overly long titles by asking the LLM for a concise summary.
+# ---------------------------------------------------------------------------
+TITLE_SUMMARIZE_THRESHOLD = 20
+
+
+def generate_session_title(message: str) -> str | None:
+    """Use the LLM to summarize a long user message into a concise title.
+
+    Returns ``None`` on failure so callers can keep the existing fallback.
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+
+        llm = ChatOpenAI(
+            model=MODEL_CONFIG["model_name"],
+            api_key=MODEL_CONFIG["api_key"] or "EMPTY",
+            base_url=MODEL_CONFIG["base_url"] or None,
+            temperature=0.1,
+            request_timeout=30,
+            extra_body=MODEL_CONFIG["generate_args"] or None,
+        )
+        result = llm.invoke([
+            SystemMessage(content=(
+                "你是一个标题生成助手。请将用户输入的内容总结为一个简短的中文标题，"
+                "不超过15个字，直接输出标题文字，不要包含引号、书名号或句号等标点符号。"
+            )),
+            HumanMessage(content=message[:2000]),
+        ])
+        title = message_content_text(getattr(result, "content", "")).strip()
+        title = title.strip("\"'“”‘’「」【】·-— ")
+        return title[:40] if title else None
+    except Exception:
+        return None
+
+
+def maybe_generate_session_title(session_id: str, message: str) -> None:
+    """Best-effort: summarize a long user message into a session title via AI.
+
+    Only replaces the title when the current one is our own truncated version
+    (set by ``db.create_session``). User-renamed titles are preserved.
+    """
+    text = (message or "").strip()
+    if len(text) <= TITLE_SUMMARIZE_THRESHOLD:
+        return
+    try:
+        existing = db.get_session(session_id)
+        existing_title = (existing.get("title") or "").strip() if existing else ""
+        truncated = text[:80]
+        # Only replace if the current title is our auto-generated truncated version
+        if existing_title and existing_title != truncated:
+            return  # User has set a custom title, don't overwrite
+    except Exception:
+        return
+    title = generate_session_title(text)
+    if title:
+        db.rename_session(session_id, title)
+
+
+# ---------------------------------------------------------------------------
 # DB row serializers -- convert dict_row results to JSON-friendly dicts.
 # FastAPI handles datetime/UUID encoding; we only reshape images/assessments.
 # ---------------------------------------------------------------------------
@@ -1181,6 +1241,12 @@ def chat(
                 system_prompt=system_prompt,
                 title=(message.strip()[:80] or None),
             )
+            # AI 总结长输入为会话标题 (后台执行，不阻塞主流程)
+            threading.Thread(
+                target=maybe_generate_session_title,
+                args=(session_id, message),
+                daemon=True,
+            ).start()
             db.save_chat_message(
                 session_id,
                 "user",
@@ -1333,6 +1399,12 @@ def chat_stream(
             system_prompt=system_prompt,
             title=(message.strip()[:80] or None),
         )
+        # AI 总结长输入为会话标题 (后台执行，不阻塞主流程)
+        threading.Thread(
+            target=maybe_generate_session_title,
+            args=(session_id, message),
+            daemon=True,
+        ).start()
         db.save_chat_message(
             session_id,
             "user",
