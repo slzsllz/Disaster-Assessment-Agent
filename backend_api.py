@@ -1365,6 +1365,7 @@ def render_pdf_report(
         story.append(Spacer(1, 4 * mm))
 
         # ---- 正文章节 ----
+        figure_index = 0  # 图片按在 PDF 中出现的顺序独立编号
         for i, section in enumerate(sections, 1):
             heading = section.get("heading", "")
             content = section.get("content", "")
@@ -1381,7 +1382,8 @@ def render_pdf_report(
 
             # 插入章节关联的图片
             if img_name:
-                block.extend(_make_image_flowable(img_name, f"图 {i}：{img_name}"))
+                figure_index += 1
+                block.extend(_make_image_flowable(img_name, f"图 {figure_index}：{img_name}"))
 
             # 尝试保持章节标题与首段在同一页
             if block:
