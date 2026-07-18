@@ -1089,6 +1089,48 @@ def render_pdf_report(
             title=title,
         )
 
+        # 团队 logo -- 以水印形式绘制在每页中央（半透明、位于内容下层）
+        logo_path = PROJECT_ROOT / "frontend" / "chatDisaster" / "src" / "assets" / "team.png"
+        # 水印尺寸：占页面宽度的 40%，保持原始宽高比
+        wm_width = 0.40 * A4[0]
+        wm_height = wm_width  # 正方形占位，preserveAspectRatio 会自动调整
+
+        def _watermark_image(src_path: Path, opacity: float = 0.12) -> Path | None:
+            """用 Pillow 把原图处理成指定透明度的水印图，避免影响 canvas alpha 状态。"""
+            try:
+                from PIL import Image
+
+                img = Image.open(src_path).convert("RGBA")
+                alpha = img.split()[3]
+                alpha = alpha.point(lambda p: int(p * opacity))
+                img.putalpha(alpha)
+                out_path = TEMP_BASE / f"wm_{uuid.uuid4().hex}.png"
+                img.save(out_path, "PNG")
+                return out_path
+            except Exception:
+                return None
+
+        _cached_wm_path: Path | None = None
+
+        def _draw_logo(canvas, doc):
+            nonlocal _cached_wm_path
+            if not logo_path.exists():
+                return
+            if _cached_wm_path is None:
+                _cached_wm_path = _watermark_image(logo_path, opacity=0.12)
+            wm_path = _cached_wm_path or logo_path
+            canvas.saveState()
+            canvas.drawImage(
+                str(wm_path),
+                (A4[0] - wm_width) / 2,   # 水平居中
+                (A4[1] - wm_height) / 2,   # 垂直居中
+                width=wm_width,
+                height=wm_height,
+                mask="auto",
+                preserveAspectRatio=True,
+            )
+            canvas.restoreState()
+
         title_style = ParagraphStyle(
             "ReportTitle",
             fontName=font,
@@ -1161,7 +1203,7 @@ def render_pdf_report(
                     story.append(Paragraph(_escape_xml(para), body_style))
             story.append(Spacer(1, 2 * mm))
 
-        doc.build(story)
+        doc.build(story, onFirstPage=_draw_logo, onLaterPages=_draw_logo)
         return buffer.getvalue()
     except Exception:
         return None
@@ -1236,6 +1278,8 @@ def _file_descriptor(path: str) -> dict[str, str]:
 
 
 def _serialize_message(row: dict) -> dict[str, Any]:
+    import base64
+
     images: list[dict[str, str]] = []
 
     # 优先从二进制字段读取图片
@@ -1250,7 +1294,6 @@ def _serialize_message(row: dict) -> dict[str, Any]:
             # 生成一个临时 file_id 用于访问
             file_id = uuid.uuid4().hex
             # 将 base64 解码并写入临时文件
-            import base64
             data = base64.b64decode(data_b64)
             temp_path = TEMP_BASE / f"{file_id}_{name}"
             temp_path.write_bytes(data)
@@ -1279,7 +1322,6 @@ def _serialize_message(row: dict) -> dict[str, Any]:
         data_b64 = att_file.get("data_base64")
         if data_b64:
             file_id = uuid.uuid4().hex
-            import base64
             data = base64.b64decode(data_b64)
             temp_path = TEMP_BASE / f"{file_id}_{name}"
             temp_path.write_bytes(data)
