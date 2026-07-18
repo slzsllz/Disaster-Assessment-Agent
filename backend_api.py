@@ -987,12 +987,14 @@ def _ensure_cjk_font() -> str:
 
 
 def generate_report_content(
-    answer_text: str, user_question: str
-) -> tuple[str, str, list[dict[str, str]]] | None:
+    answer_text: str, user_question: str, image_names: list[str] | None = None
+) -> tuple[str, str, list[dict[str, Any]]] | None:
     """Ask the LLM to produce a structured report from the conversation.
 
     Returns ``(title, summary, sections)`` where *sections* is a list of
-    ``{"heading": ..., "content": ...}`` dicts, or ``None`` on failure.
+    ``{"heading": ..., "content": ..., "image": ...}`` dicts. The *image*
+    field is the name of an image to embed after the section content, or
+    ``None``.  Returns ``None`` on failure.
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -1001,26 +1003,53 @@ def generate_report_content(
             model=MODEL_CONFIG["model_name"],
             api_key=MODEL_CONFIG["api_key"] or "EMPTY",
             base_url=MODEL_CONFIG["base_url"] or None,
-            temperature=0.3,
-            request_timeout=60,
+            temperature=0.4,
+            request_timeout=90,
             extra_body=MODEL_CONFIG["generate_args"] or None,
         )
+
+        image_hint = ""
+        if image_names:
+            image_hint = (
+                "\n本次分析生成了以下图片，你可以在章节中通过字段 \"image\" 引用图片文件名"
+                "（必须完全匹配下列名称之一）以将该图片插入到该章节内容后：\n"
+                + "\n".join(f"- {n}" for n in image_names)
+                + "\n未引用图片的章节 image 字段留空。尽量在每个分析章节都引用相关图片。\n"
+            )
+
         prompt = (
-            "你是一个灾害评估报告生成助手。请根据以下用户问题与AI回答，生成一份结构化的评估报告。\n\n"
-            f"用户问题：\n{user_question[:2000]}\n\n"
-            f"AI回答：\n{answer_text[:4000]}\n\n"
+            "你是一位资深的灾害评估分析师，请根据以下用户问题与AI回答，撰写一份内容详实、结构规范、"
+            "专业严谨的灾害评估报告。报告应当像正式的技术文档一样排版，包含丰富的细节和分析。\n\n"
+            f"用户问题：\n{user_question[:3000]}\n\n"
+            f"AI回答：\n{answer_text[:6000]}\n\n"
+            f"{image_hint}"
             "请返回纯JSON（不要包含```json标记或其他文字），格式如下：\n"
-            '{"title":"报告标题（简短，不超过20字）",'
-            '"summary":"报告简要说明（1-2句话，说明报告的主要内容和目的）",'
-            '"sections":[{"heading":"章节标题","content":"章节正文（可含多段，用\\n分隔）"}]}\n\n'
-            "要求：\n"
+            "{\n"
+            '  "title": "报告标题（简短有力，不超过20字，体现灾害类型和区域）",\n'
+            '  "summary": "报告摘要（3-5句话，概括分析目的、方法、主要结论和价值，至少80字）",\n'
+            '  "sections": [\n'
+            '    {\n'
+            '      "heading": "章节标题",\n'
+            '      "content": "章节正文，可以包含多段，用\\n分隔段落。每段应有实质内容，避免空话",\n'
+            '      "image": "图片文件名（可选，引用上述列表中的名称，无则留空字符串）"\n'
+            '    }\n'
+            "  ]\n"
+            "}\n\n"
+            "报告结构要求（至少包含以下章节，可根据实际情况增加）：\n"
+            "1. \"研究背景与目标\" - 说明灾害背景、分析目标和意义\n"
+            "2. \"数据源与方法\" - 描述使用的遥感数据、分析方法和工具流程\n"
+            "3. \"分析结果\" - 详细描述检测结果，包含数量统计、空间分布特征等，应引用相关图片\n"
+            "4. \"灾害影响评估\" - 评估灾害的影响范围、严重程度\n"
+            "5. \"结论与建议\" - 总结主要发现，提出应对建议\n\n"
+            "内容要求：\n"
             "1. 报告语言与对话语言一致（通常为中文）\n"
-            "2. 至少包含'分析概述'、'主要发现'、'结论与建议'三个章节\n"
-            "3. 内容基于AI回答，不要编造信息\n"
-            "4. 只返回JSON"
+            "2. 每个章节内容丰富详实，至少150字，避免空洞\n"
+            "3. 包含具体数据、数值、百分比等量化信息（基于AI回答，不编造）\n"
+            "4. 专业术语准确，逻辑清晰\n"
+            "5. 只返回JSON，不要有额外文字"
         )
         result = llm.invoke([
-            SystemMessage(content="你是一个专业的报告生成助手，只返回有效的JSON。"),
+            SystemMessage(content="你是一位专业的灾害评估报告撰写专家，只返回有效的JSON。"),
             HumanMessage(content=prompt),
         ])
         raw = message_content_text(getattr(result, "content", "")).strip()
@@ -1034,14 +1063,19 @@ def generate_report_content(
         data = json.loads(raw)
         title = str(data.get("title", "灾害评估报告")).strip()[:50]
         summary = str(data.get("summary", "")).strip()
+        valid_names = set(image_names or [])
         sections = []
         for sec in data.get("sections", []):
             heading = str(sec.get("heading", "")).strip()
             content = str(sec.get("content", "")).strip()
+            img = str(sec.get("image", "")).strip()
             if heading or content:
-                sections.append({"heading": heading, "content": content})
+                # 只保留实际存在的图片名
+                if img and img not in valid_names:
+                    img = ""
+                sections.append({"heading": heading, "content": content, "image": img or None})
         if not sections:
-            sections = [{"heading": "报告内容", "content": answer_text[:2000]}]
+            sections = [{"heading": "报告内容", "content": answer_text[:2000], "image": None}]
         return title, summary, sections
     except Exception:
         return None
@@ -1060,13 +1094,20 @@ def _escape_xml(text: str) -> str:
 def render_pdf_report(
     title: str,
     summary: str,
-    sections: list[dict[str, str]],
+    sections: list[dict[str, Any]],
     user_question: str = "",
+    images: list[dict[str, Any]] | None = None,
 ) -> bytes | None:
-    """Render a structured report as a PDF using reportlab with CJK fonts."""
+    """Render a structured report as a PDF using reportlab with CJK fonts.
+
+    Args:
+        images: list of ``{"name", "data"}`` dicts where *data* is raw bytes.
+            Section entries may reference an image by ``name`` via the
+            ``image`` field; the image will be embedded after that section.
+    """
     try:
         from reportlab.lib import colors
-        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle
         from reportlab.lib.units import mm
@@ -1075,17 +1116,22 @@ def render_pdf_report(
             Paragraph,
             Spacer,
             HRFlowable,
+            Image as RLImage,
+            Table,
+            TableStyle,
+            KeepTogether,
         )
+        from reportlab.lib.utils import ImageReader
 
         font = _ensure_cjk_font()
         buffer = _io.BytesIO()
         doc = SimpleDocTemplate(
             buffer,
             pagesize=A4,
-            leftMargin=25 * mm,
-            rightMargin=25 * mm,
-            topMargin=25 * mm,
-            bottomMargin=25 * mm,
+            leftMargin=22 * mm,
+            rightMargin=22 * mm,
+            topMargin=22 * mm,
+            bottomMargin=22 * mm,
             title=title,
         )
 
@@ -1131,13 +1177,27 @@ def render_pdf_report(
             )
             canvas.restoreState()
 
-        title_style = ParagraphStyle(
-            "ReportTitle",
+        # 内容宽度（用于图片缩放）
+        content_width = A4[0] - 44 * mm
+
+        # ---- 样式定义 ----
+        cover_title_style = ParagraphStyle(
+            "CoverTitle",
             fontName=font,
-            fontSize=20,
+            fontSize=26,
             alignment=TA_CENTER,
-            spaceAfter=6 * mm,
-            leading=26,
+            spaceAfter=10 * mm,
+            leading=34,
+            textColor=colors.HexColor("#1a2a3a"),
+        )
+        cover_sub_style = ParagraphStyle(
+            "CoverSub",
+            fontName=font,
+            fontSize=13,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#5a6a7a"),
+            spaceAfter=4 * mm,
+            leading=20,
         )
         meta_style = ParagraphStyle(
             "ReportMeta",
@@ -1147,16 +1207,46 @@ def render_pdf_report(
             textColor=colors.grey,
             spaceAfter=4 * mm,
         )
+        toc_heading_style = ParagraphStyle(
+            "TocHeading",
+            fontName=font,
+            fontSize=14,
+            alignment=TA_LEFT,
+            spaceBefore=6 * mm,
+            spaceAfter=4 * mm,
+            leading=18,
+            textColor=colors.HexColor("#1a1a1a"),
+        )
+        toc_item_style = ParagraphStyle(
+            "TocItem",
+            fontName=font,
+            fontSize=10.5,
+            alignment=TA_LEFT,
+            leading=18,
+            leftIndent=6 * mm,
+            textColor=colors.HexColor("#333333"),
+        )
+        summary_label_style = ParagraphStyle(
+            "SummaryLabel",
+            fontName=font,
+            fontSize=12,
+            alignment=TA_LEFT,
+            spaceBefore=4 * mm,
+            spaceAfter=2 * mm,
+            leading=16,
+            textColor=colors.HexColor("#1a1a1a"),
+        )
         summary_style = ParagraphStyle(
             "ReportSummary",
             fontName=font,
-            fontSize=10,
-            alignment=TA_LEFT,
-            leading=16,
-            spaceAfter=6 * mm,
+            fontSize=10.5,
+            alignment=TA_JUSTIFY,
+            leading=17,
+            spaceAfter=4 * mm,
             textColor=colors.HexColor("#333333"),
-            leftIndent=6 * mm,
-            rightIndent=6 * mm,
+            leftIndent=4 * mm,
+            rightIndent=4 * mm,
+            firstLineIndent=21,  # 首行缩进2字符
         )
         heading_style = ParagraphStyle(
             "ReportHeading",
@@ -1166,42 +1256,159 @@ def render_pdf_report(
             spaceBefore=8 * mm,
             spaceAfter=3 * mm,
             leading=18,
-            textColor=colors.HexColor("#1a1a1a"),
+            textColor=colors.HexColor("#ffffff"),
+            backColor=colors.HexColor("#4a6fa5"),
+            borderPadding=(3, 4, 3, 4),
+            leftIndent=0,
         )
         body_style = ParagraphStyle(
             "ReportBody",
             fontName=font,
-            fontSize=10,
-            alignment=TA_LEFT,
-            leading=16,
+            fontSize=10.5,
+            alignment=TA_JUSTIFY,
+            leading=17,
             spaceAfter=2 * mm,
+            firstLineIndent=21,  # 首行缩进2字符
+        )
+        caption_style = ParagraphStyle(
+            "Caption",
+            fontName=font,
+            fontSize=9,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#666666"),
+            spaceBefore=2 * mm,
+            spaceAfter=4 * mm,
+            leading=13,
         )
 
+        # 构建图片名 -> bytes 索引
+        image_map: dict[str, bytes] = {}
+        for img in images or []:
+            if isinstance(img, dict) and img.get("name") and img.get("data"):
+                image_map[img["name"]] = img["data"]
+
+        def _make_image_flowable(img_name: str, caption: str | None = None) -> list:
+            """Build a centered, auto-scaled image flowable with optional caption."""
+            out: list[Any] = []
+            data = image_map.get(img_name)
+            if not data:
+                return out
+            try:
+                import io as _io2
+                reader = ImageReader(_io2.BytesIO(data))
+                iw, ih = reader.getSize()
+                # 最大宽度为内容宽度的 80%，保持宽高比
+                max_w = content_width * 0.80
+                max_h = 110 * mm
+                scale = min(max_w / iw, max_h / ih, 1.0)
+                draw_w = iw * scale
+                draw_h = ih * scale
+                img_flow = RLImage(
+                    _io2.BytesIO(data),
+                    width=draw_w,
+                    height=draw_h,
+                    kind="proportional",
+                )
+                # 居中：用 1x3 表格实现
+                tbl = Table(
+                    [["", img_flow, ""]],
+                    colWidths=[(content_width - draw_w) / 2, draw_w, (content_width - draw_w) / 2],
+                )
+                tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+                out.append(Spacer(1, 2 * mm))
+                out.append(tbl)
+                if caption:
+                    out.append(Paragraph(_escape_xml(caption), caption_style))
+                else:
+                    out.append(Spacer(1, 3 * mm))
+            except Exception:
+                pass
+            return out
+
         story: list[Any] = []
-        story.append(Paragraph(_escape_xml(title), title_style))
+
+        # ---- 封面区域 ----
+        story.append(Spacer(1, 30 * mm))
+        story.append(Paragraph(_escape_xml(title), cover_title_style))
+        story.append(Paragraph("灾害评估分析报告", cover_sub_style))
+        story.append(Spacer(1, 8 * mm))
+        story.append(HRFlowable(width="60%", thickness=1.2, color=colors.HexColor("#4a6fa5"), hAlign="CENTER"))
+        story.append(Spacer(1, 8 * mm))
         story.append(
             Paragraph(
-                f"生成时间：{_datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                f"生成时间：{_datetime.now().strftime('%Y年%m月%d日 %H:%M')}",
                 meta_style,
             )
         )
+        story.append(Spacer(1, 20 * mm))
+
+        # ---- 目录 ----
+        story.append(Paragraph("目 录", toc_heading_style))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc")))
+        story.append(Spacer(1, 2 * mm))
+        for i, section in enumerate(sections, 1):
+            heading = section.get("heading", "")
+            if heading:
+                story.append(Paragraph(f"{i}. {_escape_xml(heading)}", toc_item_style))
+
+        story.append(Spacer(1, 6 * mm))
         story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc")))
         story.append(Spacer(1, 4 * mm))
 
+        # ---- 摘要 ----
         if summary:
-            story.append(Paragraph(_escape_xml(summary), summary_style))
+            story.append(Paragraph("摘 要", summary_label_style))
+            story.append(HRFlowable(width="20%", thickness=0.8, color=colors.HexColor("#4a6fa5"), hAlign="LEFT"))
             story.append(Spacer(1, 2 * mm))
+            story.append(Paragraph(_escape_xml(summary), summary_style))
 
-        for section in sections:
+        story.append(Spacer(1, 4 * mm))
+
+        # ---- 正文章节 ----
+        for i, section in enumerate(sections, 1):
             heading = section.get("heading", "")
             content = section.get("content", "")
+            img_name = section.get("image")
+
+            block: list[Any] = []
             if heading:
-                story.append(Paragraph(_escape_xml(heading), heading_style))
+                # 章节标题带编号
+                block.append(Paragraph(f"{i}. {_escape_xml(heading)}", heading_style))
             for para in content.split("\n"):
                 para = para.strip()
                 if para:
-                    story.append(Paragraph(_escape_xml(para), body_style))
-            story.append(Spacer(1, 2 * mm))
+                    block.append(Paragraph(_escape_xml(para), body_style))
+
+            # 插入章节关联的图片
+            if img_name:
+                block.extend(_make_image_flowable(img_name, f"图 {i}：{img_name}"))
+
+            # 尝试保持章节标题与首段在同一页
+            if block:
+                if len(block) >= 2 and isinstance(block[0], Paragraph):
+                    story.append(KeepTogether(block[:2]))
+                    story.extend(block[2:])
+                else:
+                    story.append(KeepTogether(block))
+            story.append(Spacer(1, 3 * mm))
+
+        # ---- 页脚说明 ----
+        story.append(Spacer(1, 6 * mm))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc")))
+        story.append(Spacer(1, 2 * mm))
+        story.append(
+            Paragraph(
+                "本报告由灾害检测智能体自动生成，仅供参考。",
+                ParagraphStyle(
+                    "Footer",
+                    fontName=font,
+                    fontSize=8,
+                    alignment=TA_CENTER,
+                    textColor=colors.grey,
+                    leading=12,
+                ),
+            )
+        )
 
         doc.build(story, onFirstPage=_draw_logo, onLaterPages=_draw_logo)
         return buffer.getvalue()
@@ -1214,6 +1421,7 @@ def generate_and_store_pdf_report(
     user_question: str,
     session_id: str,
     message_id: int | None = None,
+    images: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Generate a PDF report from the assistant answer and register it.
 
@@ -1221,17 +1429,27 @@ def generate_and_store_pdf_report(
     ``db.update_message_report_files`` so that history reloads show the
     report card.  Returns a dict suitable for the frontend ``report`` field,
     or ``None`` on failure.
+
+    Args:
+        images: list of ``{"name", "data"}`` dicts (data = raw bytes) to be
+            embedded into the PDF when referenced by section ``image``.
     """
-    result = generate_report_content(answer_text, user_question)
+    # 收集图片名供 LLM 引用
+    image_names = [img["name"] for img in (images or []) if img.get("name")]
+
+    result = generate_report_content(answer_text, user_question, image_names=image_names)
     if result is None:
         # Fallback: generate a minimal report without LLM
         title = "灾害评估报告"
         summary = "基于对话内容自动生成的评估报告。"
-        sections = [{"heading": "分析结果", "content": answer_text[:3000]}]
+        sections = [{"heading": "分析结果", "content": answer_text[:3000], "image": None}]
+        # 无 LLM 时，把所有图片附在末尾章节
+        if image_names and sections:
+            sections[0]["image"] = image_names[0]
     else:
         title, summary, sections = result
 
-    pdf_bytes = render_pdf_report(title, summary, sections, user_question)
+    pdf_bytes = render_pdf_report(title, summary, sections, user_question, images=images)
     if not pdf_bytes:
         return None
 
@@ -1636,12 +1854,18 @@ def chat(
                 legend=legend,
             )
 
-            # 生成 PDF 报告
+            # 生成 PDF 报告（传入图片原始字节用于嵌入）
+            report_images = [
+                {"name": Path(p).name, "data": Path(p).read_bytes()}
+                for p in images
+                if Path(p).exists()
+            ]
             report = generate_and_store_pdf_report(
                 display_answer or final_answer or raw_answer,
                 message,
                 session_id,
                 message_id=_msg_id,
+                images=report_images,
             )
 
             return {
@@ -1759,6 +1983,7 @@ def chat_stream(
         _final_answer_text = ""
         _final_msg_id: int | None = None
         _final_user_question = message
+        _final_image_paths: list[str] = []
         try:
             yield sse_event("status", {"message": "正在思考..."})
             for item in session.handle.stream(
@@ -1826,6 +2051,7 @@ def chat_stream(
                         legend=legend,
                     )
                     _final_answer_text = display_answer or final_answer or streamed_text
+                    _final_image_paths = list(images)
 
                     yield sse_event(
                         "done",
@@ -1844,11 +2070,17 @@ def chat_stream(
             # 对话结束后生成 PDF 报告
             if _final_answer_text:
                 yield sse_event("status", {"message": "正在生成报告..."})
+                report_images = [
+                    {"name": Path(p).name, "data": Path(p).read_bytes()}
+                    for p in _final_image_paths
+                    if Path(p).exists()
+                ]
                 report = generate_and_store_pdf_report(
                     _final_answer_text,
                     _final_user_question,
                     session_id,
                     message_id=_final_msg_id,
+                    images=report_images,
                 )
                 if report:
                     yield sse_event("report", report)
