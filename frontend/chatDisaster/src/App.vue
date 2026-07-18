@@ -673,6 +673,17 @@ async function sendMessage() {
   attachments.value = []
   isSending.value = true
 
+  // 如果是新会话，先临时加入侧边栏历史列表，避免生成过程中看不到当前会话
+  const existing = conversationHistory.value.find((item) => item.id === sessionId.value)
+  if (!existing) {
+    conversationHistory.value.unshift({
+      id: sessionId.value,
+      title: compactTitle(text) || '新对话',
+      updatedAt: Date.now(),
+      messages: [],
+    })
+  }
+
   try {
     const response = await fetch('/api/chat/stream', {
       method: 'POST',
@@ -744,6 +755,8 @@ async function sendMessage() {
     isSending.value = false
     await fetchSessions()
     await showLatestSessionGeometry()
+    // AI 总结标题在后台线程执行，稍后再刷新一次以显示 AI 生成的 title
+    setTimeout(() => fetchSessions(), 3500)
   }
 }
 
