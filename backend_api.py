@@ -1001,6 +1001,583 @@ def sse_event(event: str, data: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# AI session title summarization -- prevent long user input from producing
+# overly long titles by asking the LLM for a concise summary.
+# ---------------------------------------------------------------------------
+TITLE_SUMMARIZE_THRESHOLD = 20
+
+
+def generate_session_title(message: str) -> str | None:
+    """Use the LLM to summarize a long user message into a concise title.
+
+    Returns ``None`` on failure so callers can keep the existing fallback.
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+
+        llm = ChatOpenAI(
+            model=MODEL_CONFIG["model_name"],
+            api_key=MODEL_CONFIG["api_key"] or "EMPTY",
+            base_url=MODEL_CONFIG["base_url"] or None,
+            temperature=0.1,
+            request_timeout=30,
+            extra_body=MODEL_CONFIG["generate_args"] or None,
+        )
+        result = llm.invoke([
+            SystemMessage(content=(
+                "你是一个标题生成助手。请将用户输入的内容总结为一个简短的中文标题，"
+                "不超过15个字，直接输出标题文字，不要包含引号、书名号或句号等标点符号。"
+            )),
+            HumanMessage(content=message[:2000]),
+        ])
+        title = message_content_text(getattr(result, "content", "")).strip()
+        title = title.strip("\"'“”‘’「」【】·-— ")
+        return title[:40] if title else None
+    except Exception:
+        return None
+
+
+def maybe_generate_session_title(session_id: str, message: str) -> None:
+    """Best-effort: summarize a long user message into a session title via AI.
+
+    Only replaces the title when the current one is our own truncated version
+    (set by ``db.create_session``). User-renamed titles are preserved.
+    """
+    text = (message or "").strip()
+    if len(text) <= TITLE_SUMMARIZE_THRESHOLD:
+        return
+    try:
+        existing = db.get_session(session_id)
+        existing_title = (existing.get("title") or "").strip() if existing else ""
+        truncated = text[:80]
+        # Only replace if the current title is our auto-generated truncated version
+        if existing_title and existing_title != truncated:
+            return  # User has set a custom title, don't overwrite
+    except Exception:
+        return
+    title = generate_session_title(text)
+    if title:
+        db.rename_session(session_id, title)
+
+
+# ---------------------------------------------------------------------------
+# AI-powered PDF report generation -- after each conversation the LLM
+# summarises the answer into a structured report which is rendered as a
+# downloadable PDF using reportlab (with CJK font support).
+# ---------------------------------------------------------------------------
+import io as _io  # noqa: E402  (local import to avoid top-level clutter)
+from datetime import datetime as _datetime  # noqa: E402
+
+_CJK_FONT_REGISTERED = False
+
+
+def _ensure_cjk_font() -> str:
+    """Register the STSong-Light CJK font for reportlab (idempotent)."""
+    global _CJK_FONT_REGISTERED
+    if not _CJK_FONT_REGISTERED:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+        _CJK_FONT_REGISTERED = True
+    return "STSong-Light"
+
+
+def generate_report_content(
+    answer_text: str, user_question: str, image_names: list[str] | None = None
+) -> tuple[str, str, list[dict[str, Any]]] | None:
+    """Ask the LLM to produce a structured report from the conversation.
+
+    Returns ``(title, summary, sections)`` where *sections* is a list of
+    ``{"heading": ..., "content": ..., "image": ...}`` dicts. The *image*
+    field is the name of an image to embed after the section content, or
+    ``None``.  Returns ``None`` on failure.
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+
+        llm = ChatOpenAI(
+            model=MODEL_CONFIG["model_name"],
+            api_key=MODEL_CONFIG["api_key"] or "EMPTY",
+            base_url=MODEL_CONFIG["base_url"] or None,
+            temperature=0.4,
+            request_timeout=90,
+            extra_body=MODEL_CONFIG["generate_args"] or None,
+        )
+
+        image_hint = ""
+        if image_names:
+            image_hint = (
+                "\n本次分析生成了以下图片，你可以在章节中通过字段 \"image\" 引用图片文件名"
+                "（必须完全匹配下列名称之一）以将该图片插入到该章节内容后：\n"
+                + "\n".join(f"- {n}" for n in image_names)
+                + "\n未引用图片的章节 image 字段留空。尽量在每个分析章节都引用相关图片。\n"
+            )
+
+        prompt = (
+            "你是一位资深的灾害评估分析师，请根据以下用户问题与AI回答，撰写一份内容详实、结构规范、"
+            "专业严谨的灾害评估报告。报告应当像正式的技术文档一样排版，包含丰富的细节和分析。\n\n"
+            f"用户问题：\n{user_question[:3000]}\n\n"
+            f"AI回答：\n{answer_text[:6000]}\n\n"
+            f"{image_hint}"
+            "请返回纯JSON（不要包含```json标记或其他文字），格式如下：\n"
+            "{\n"
+            '  "title": "报告标题（简短有力，不超过20字，体现灾害类型和区域）",\n'
+            '  "summary": "报告摘要（3-5句话，概括分析目的、方法、主要结论和价值，至少80字）",\n'
+            '  "sections": [\n'
+            '    {\n'
+            '      "heading": "章节标题",\n'
+            '      "content": "章节正文，可以包含多段，用\\n分隔段落。每段应有实质内容，避免空话",\n'
+            '      "image": "图片文件名（可选，引用上述列表中的名称，无则留空字符串）"\n'
+            '    }\n'
+            "  ]\n"
+            "}\n\n"
+            "报告结构要求（至少包含以下章节，可根据实际情况增加）：\n"
+            "1. \"研究背景与目标\" - 说明灾害背景、分析目标和意义\n"
+            "2. \"数据源与方法\" - 描述使用的遥感数据、分析方法和工具流程\n"
+            "3. \"分析结果\" - 详细描述检测结果，包含数量统计、空间分布特征等，应引用相关图片\n"
+            "4. \"灾害影响评估\" - 评估灾害的影响范围、严重程度\n"
+            "5. \"结论与建议\" - 总结主要发现，提出应对建议\n\n"
+            "内容要求：\n"
+            "1. 报告语言与对话语言一致（通常为中文）\n"
+            "2. 每个章节内容丰富详实，至少150字，避免空洞\n"
+            "3. 包含具体数据、数值、百分比等量化信息（基于AI回答，不编造）\n"
+            "4. 专业术语准确，逻辑清晰\n"
+            "5. 只返回JSON，不要有额外文字"
+        )
+        result = llm.invoke([
+            SystemMessage(content="你是一位专业的灾害评估报告撰写专家，只返回有效的JSON。"),
+            HumanMessage(content=prompt),
+        ])
+        raw = message_content_text(getattr(result, "content", "")).strip()
+        # Strip possible markdown fences
+        if raw.startswith("```"):
+            raw = raw.split("```", 2)
+            raw = raw[1] if len(raw) >= 2 else raw[0]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+        data = json.loads(raw)
+        title = str(data.get("title", "灾害评估报告")).strip()[:50]
+        summary = str(data.get("summary", "")).strip()
+        valid_names = set(image_names or [])
+        sections = []
+        for sec in data.get("sections", []):
+            heading = str(sec.get("heading", "")).strip()
+            content = str(sec.get("content", "")).strip()
+            img = str(sec.get("image", "")).strip()
+            if heading or content:
+                # 只保留实际存在的图片名
+                if img and img not in valid_names:
+                    img = ""
+                sections.append({"heading": heading, "content": content, "image": img or None})
+        if not sections:
+            sections = [{"heading": "报告内容", "content": answer_text[:2000], "image": None}]
+        return title, summary, sections
+    except Exception:
+        return None
+
+
+def _escape_xml(text: str) -> str:
+    """Escape characters that are special in reportlab's Paragraph markup."""
+    return (
+        str(text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def render_pdf_report(
+    title: str,
+    summary: str,
+    sections: list[dict[str, Any]],
+    user_question: str = "",
+    images: list[dict[str, Any]] | None = None,
+) -> bytes | None:
+    """Render a structured report as a PDF using reportlab with CJK fonts.
+
+    Args:
+        images: list of ``{"name", "data"}`` dicts where *data* is raw bytes.
+            Section entries may reference an image by ``name`` via the
+            ``image`` field; the image will be embedded after that section.
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.platypus import (
+            SimpleDocTemplate,
+            Paragraph,
+            Spacer,
+            HRFlowable,
+            Image as RLImage,
+            Table,
+            TableStyle,
+            KeepTogether,
+        )
+        from reportlab.lib.utils import ImageReader
+
+        font = _ensure_cjk_font()
+        buffer = _io.BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            leftMargin=22 * mm,
+            rightMargin=22 * mm,
+            topMargin=22 * mm,
+            bottomMargin=22 * mm,
+            title=title,
+        )
+
+        # 团队 logo -- 以水印形式绘制在每页中央（半透明、位于内容下层）
+        logo_path = PROJECT_ROOT / "frontend" / "chatDisaster" / "src" / "assets" / "team.png"
+        # 水印尺寸：占页面宽度的 40%，保持原始宽高比
+        wm_width = 0.40 * A4[0]
+        wm_height = wm_width  # 正方形占位，preserveAspectRatio 会自动调整
+
+        def _watermark_image(src_path: Path, opacity: float = 0.12) -> Path | None:
+            """用 Pillow 把原图处理成指定透明度的水印图，避免影响 canvas alpha 状态。"""
+            try:
+                from PIL import Image
+
+                img = Image.open(src_path).convert("RGBA")
+                alpha = img.split()[3]
+                alpha = alpha.point(lambda p: int(p * opacity))
+                img.putalpha(alpha)
+                out_path = TEMP_BASE / f"wm_{uuid.uuid4().hex}.png"
+                img.save(out_path, "PNG")
+                return out_path
+            except Exception:
+                return None
+
+        _cached_wm_path: Path | None = None
+
+        def _draw_logo(canvas, doc):
+            nonlocal _cached_wm_path
+            if not logo_path.exists():
+                return
+            if _cached_wm_path is None:
+                _cached_wm_path = _watermark_image(logo_path, opacity=0.12)
+            wm_path = _cached_wm_path or logo_path
+            canvas.saveState()
+            canvas.drawImage(
+                str(wm_path),
+                (A4[0] - wm_width) / 2,   # 水平居中
+                (A4[1] - wm_height) / 2,   # 垂直居中
+                width=wm_width,
+                height=wm_height,
+                mask="auto",
+                preserveAspectRatio=True,
+            )
+            canvas.restoreState()
+
+        # 内容宽度（用于图片缩放）
+        content_width = A4[0] - 44 * mm
+
+        # ---- 样式定义 ----
+        cover_title_style = ParagraphStyle(
+            "CoverTitle",
+            fontName=font,
+            fontSize=26,
+            alignment=TA_CENTER,
+            spaceAfter=10 * mm,
+            leading=34,
+            textColor=colors.HexColor("#1a2a3a"),
+        )
+        cover_sub_style = ParagraphStyle(
+            "CoverSub",
+            fontName=font,
+            fontSize=13,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#5a6a7a"),
+            spaceAfter=4 * mm,
+            leading=20,
+        )
+        meta_style = ParagraphStyle(
+            "ReportMeta",
+            fontName=font,
+            fontSize=9,
+            alignment=TA_CENTER,
+            textColor=colors.grey,
+            spaceAfter=4 * mm,
+        )
+        toc_heading_style = ParagraphStyle(
+            "TocHeading",
+            fontName=font,
+            fontSize=14,
+            alignment=TA_LEFT,
+            spaceBefore=6 * mm,
+            spaceAfter=4 * mm,
+            leading=18,
+            textColor=colors.HexColor("#1a1a1a"),
+        )
+        toc_item_style = ParagraphStyle(
+            "TocItem",
+            fontName=font,
+            fontSize=10.5,
+            alignment=TA_LEFT,
+            leading=18,
+            leftIndent=6 * mm,
+            textColor=colors.HexColor("#333333"),
+        )
+        summary_label_style = ParagraphStyle(
+            "SummaryLabel",
+            fontName=font,
+            fontSize=12,
+            alignment=TA_LEFT,
+            spaceBefore=4 * mm,
+            spaceAfter=2 * mm,
+            leading=16,
+            textColor=colors.HexColor("#1a1a1a"),
+        )
+        summary_style = ParagraphStyle(
+            "ReportSummary",
+            fontName=font,
+            fontSize=10.5,
+            alignment=TA_JUSTIFY,
+            leading=17,
+            spaceAfter=4 * mm,
+            textColor=colors.HexColor("#333333"),
+            leftIndent=4 * mm,
+            rightIndent=4 * mm,
+            firstLineIndent=21,  # 首行缩进2字符
+        )
+        heading_style = ParagraphStyle(
+            "ReportHeading",
+            fontName=font,
+            fontSize=14,
+            alignment=TA_LEFT,
+            spaceBefore=8 * mm,
+            spaceAfter=3 * mm,
+            leading=18,
+            textColor=colors.HexColor("#ffffff"),
+            backColor=colors.HexColor("#4a6fa5"),
+            borderPadding=(3, 4, 3, 4),
+            leftIndent=0,
+        )
+        body_style = ParagraphStyle(
+            "ReportBody",
+            fontName=font,
+            fontSize=10.5,
+            alignment=TA_JUSTIFY,
+            leading=17,
+            spaceAfter=2 * mm,
+            firstLineIndent=21,  # 首行缩进2字符
+        )
+        caption_style = ParagraphStyle(
+            "Caption",
+            fontName=font,
+            fontSize=9,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#666666"),
+            spaceBefore=2 * mm,
+            spaceAfter=4 * mm,
+            leading=13,
+        )
+
+        # 构建图片名 -> bytes 索引
+        image_map: dict[str, bytes] = {}
+        for img in images or []:
+            if isinstance(img, dict) and img.get("name") and img.get("data"):
+                image_map[img["name"]] = img["data"]
+
+        def _make_image_flowable(img_name: str, caption: str | None = None) -> list:
+            """Build a centered, auto-scaled image flowable with optional caption."""
+            out: list[Any] = []
+            data = image_map.get(img_name)
+            if not data:
+                return out
+            try:
+                import io as _io2
+                reader = ImageReader(_io2.BytesIO(data))
+                iw, ih = reader.getSize()
+                # 最大宽度为内容宽度的 80%，保持宽高比
+                max_w = content_width * 0.80
+                max_h = 110 * mm
+                scale = min(max_w / iw, max_h / ih, 1.0)
+                draw_w = iw * scale
+                draw_h = ih * scale
+                img_flow = RLImage(
+                    _io2.BytesIO(data),
+                    width=draw_w,
+                    height=draw_h,
+                    kind="proportional",
+                )
+                # 居中：用 1x3 表格实现
+                tbl = Table(
+                    [["", img_flow, ""]],
+                    colWidths=[(content_width - draw_w) / 2, draw_w, (content_width - draw_w) / 2],
+                )
+                tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+                out.append(Spacer(1, 2 * mm))
+                out.append(tbl)
+                if caption:
+                    out.append(Paragraph(_escape_xml(caption), caption_style))
+                else:
+                    out.append(Spacer(1, 3 * mm))
+            except Exception:
+                pass
+            return out
+
+        story: list[Any] = []
+
+        # ---- 封面区域 ----
+        story.append(Spacer(1, 30 * mm))
+        story.append(Paragraph(_escape_xml(title), cover_title_style))
+        story.append(Paragraph("灾害评估分析报告", cover_sub_style))
+        story.append(Spacer(1, 8 * mm))
+        story.append(HRFlowable(width="60%", thickness=1.2, color=colors.HexColor("#4a6fa5"), hAlign="CENTER"))
+        story.append(Spacer(1, 8 * mm))
+        story.append(
+            Paragraph(
+                f"生成时间：{_datetime.now().strftime('%Y年%m月%d日 %H:%M')}",
+                meta_style,
+            )
+        )
+        story.append(Spacer(1, 20 * mm))
+
+        # ---- 目录 ----
+        story.append(Paragraph("目 录", toc_heading_style))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc")))
+        story.append(Spacer(1, 2 * mm))
+        for i, section in enumerate(sections, 1):
+            heading = section.get("heading", "")
+            if heading:
+                story.append(Paragraph(f"{i}. {_escape_xml(heading)}", toc_item_style))
+
+        story.append(Spacer(1, 6 * mm))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc")))
+        story.append(Spacer(1, 4 * mm))
+
+        # ---- 摘要 ----
+        if summary:
+            story.append(Paragraph("摘 要", summary_label_style))
+            story.append(HRFlowable(width="20%", thickness=0.8, color=colors.HexColor("#4a6fa5"), hAlign="LEFT"))
+            story.append(Spacer(1, 2 * mm))
+            story.append(Paragraph(_escape_xml(summary), summary_style))
+
+        story.append(Spacer(1, 4 * mm))
+
+        # ---- 正文章节 ----
+        figure_index = 0  # 图片按在 PDF 中出现的顺序独立编号
+        for i, section in enumerate(sections, 1):
+            heading = section.get("heading", "")
+            content = section.get("content", "")
+            img_name = section.get("image")
+
+            block: list[Any] = []
+            if heading:
+                # 章节标题带编号
+                block.append(Paragraph(f"{i}. {_escape_xml(heading)}", heading_style))
+            for para in content.split("\n"):
+                para = para.strip()
+                if para:
+                    block.append(Paragraph(_escape_xml(para), body_style))
+
+            # 插入章节关联的图片
+            if img_name:
+                figure_index += 1
+                block.extend(_make_image_flowable(img_name, f"图 {figure_index}：{img_name}"))
+
+            # 尝试保持章节标题与首段在同一页
+            if block:
+                if len(block) >= 2 and isinstance(block[0], Paragraph):
+                    story.append(KeepTogether(block[:2]))
+                    story.extend(block[2:])
+                else:
+                    story.append(KeepTogether(block))
+            story.append(Spacer(1, 3 * mm))
+
+        # ---- 页脚说明 ----
+        story.append(Spacer(1, 6 * mm))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc")))
+        story.append(Spacer(1, 2 * mm))
+        story.append(
+            Paragraph(
+                "本报告由灾害检测智能体自动生成，仅供参考。",
+                ParagraphStyle(
+                    "Footer",
+                    fontName=font,
+                    fontSize=8,
+                    alignment=TA_CENTER,
+                    textColor=colors.grey,
+                    leading=12,
+                ),
+            )
+        )
+
+        doc.build(story, onFirstPage=_draw_logo, onLaterPages=_draw_logo)
+        return buffer.getvalue()
+    except Exception:
+        return None
+
+
+def generate_and_store_pdf_report(
+    answer_text: str,
+    user_question: str,
+    session_id: str,
+    message_id: int | None = None,
+    images: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Generate a PDF report from the assistant answer and register it.
+
+    If *message_id* is provided the report binary is persisted to the DB via
+    ``db.update_message_report_files`` so that history reloads show the
+    report card.  Returns a dict suitable for the frontend ``report`` field,
+    or ``None`` on failure.
+
+    Args:
+        images: list of ``{"name", "data"}`` dicts (data = raw bytes) to be
+            embedded into the PDF when referenced by section ``image``.
+    """
+    # 收集图片名供 LLM 引用
+    image_names = [img["name"] for img in (images or []) if img.get("name")]
+
+    result = generate_report_content(answer_text, user_question, image_names=image_names)
+    if result is None:
+        # Fallback: generate a minimal report without LLM
+        title = "灾害评估报告"
+        summary = "基于对话内容自动生成的评估报告。"
+        sections = [{"heading": "分析结果", "content": answer_text[:3000], "image": None}]
+        # 无 LLM 时，把所有图片附在末尾章节
+        if image_names and sections:
+            sections[0]["image"] = image_names[0]
+    else:
+        title, summary, sections = result
+
+    pdf_bytes = render_pdf_report(title, summary, sections, user_question, images=images)
+    if not pdf_bytes:
+        return None
+
+    file_id = uuid.uuid4().hex
+    safe_title = re.sub(r'[\\/:*?"<>|]', "_", title)[:40]
+    file_name = f"{safe_title}.pdf"
+    temp_path = TEMP_BASE / f"{file_id}_{file_name}"
+    temp_path.write_bytes(pdf_bytes)
+    FILES[file_id] = temp_path
+
+    report_description = summary or "基于本次对话生成的评估报告"
+    report_file_data = {
+        "name": file_name,
+        "mime_type": "application/pdf",
+        "data_base64": base64.b64encode(pdf_bytes).decode("utf-8"),
+        "description": report_description,
+    }
+
+    if message_id is not None:
+        db.update_message_report_files(message_id, [report_file_data])
+
+    return {
+        "url": f"/api/files/{file_id}",
+        "name": file_name,
+        "description": report_description,
+    }
+
+
+# ---------------------------------------------------------------------------
 # DB row serializers -- convert dict_row results to JSON-friendly dicts.
 # FastAPI handles datetime/UUID encoding; we only reshape images/assessments.
 # ---------------------------------------------------------------------------
@@ -1018,6 +1595,8 @@ def _file_descriptor(path: str) -> dict[str, str]:
 
 
 def _serialize_message(row: dict) -> dict[str, Any]:
+    import base64
+
     images: list[dict[str, str]] = []
 
     # 优先从二进制字段读取图片
@@ -1032,7 +1611,6 @@ def _serialize_message(row: dict) -> dict[str, Any]:
             # 生成一个临时 file_id 用于访问
             file_id = uuid.uuid4().hex
             # 将 base64 解码并写入临时文件
-            import base64
             data = base64.b64decode(data_b64)
             temp_path = TEMP_BASE / f"{file_id}_{name}"
             temp_path.write_bytes(data)
@@ -1061,7 +1639,6 @@ def _serialize_message(row: dict) -> dict[str, Any]:
         data_b64 = att_file.get("data_base64")
         if data_b64:
             file_id = uuid.uuid4().hex
-            import base64
             data = base64.b64decode(data_b64)
             temp_path = TEMP_BASE / f"{file_id}_{name}"
             temp_path.write_bytes(data)
@@ -1084,6 +1661,27 @@ def _serialize_message(row: dict) -> dict[str, Any]:
                 attachments.append({"name": item.get("name", "file"), "url": item["url"]})
             else:
                 attachments.append(item)
+
+    # 处理 PDF 报告文件（从二进制字段读取，生成前端可访问的 URL）
+    report = None
+    report_files = row.get("report_files") or []
+    for rf in report_files:
+        if not isinstance(rf, dict):
+            continue
+        name = rf.get("name", "report.pdf")
+        data_b64 = rf.get("data_base64")
+        if data_b64:
+            file_id = uuid.uuid4().hex
+            data = base64.b64decode(data_b64)
+            temp_path = TEMP_BASE / f"{file_id}_{name}"
+            temp_path.write_bytes(data)
+            FILES[file_id] = temp_path
+            report = {
+                "url": f"/api/files/{file_id}",
+                "name": name,
+                "description": rf.get("description") or "基于本次对话生成的评估报告",
+            }
+            break
 
     raw_content = row.get("content") or ""
     display_content = row.get("display_content")
@@ -1110,6 +1708,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
         "elapsed_seconds": row.get("elapsed_seconds"),
         "tool_call_count": row.get("tool_call_count"),
         "created_at": row.get("created_at"),
+        "report": report,
     }
 
 
@@ -1278,6 +1877,12 @@ def chat(
                 system_prompt=system_prompt,
                 title=(message.strip()[:80] or None),
             )
+            # AI 总结长输入为会话标题 (后台执行，不阻塞主流程)
+            threading.Thread(
+                target=maybe_generate_session_title,
+                args=(session_id, message),
+                daemon=True,
+            ).start()
             db.save_chat_message(
                 session_id,
                 "user",
@@ -1334,7 +1939,7 @@ def chat(
                 except Exception:
                     pass
 
-            db.save_chat_message(
+            _msg_id = db.save_chat_message(
                 session_id,
                 "assistant",
                 content=final_answer or reviewed_answer or raw_answer,
@@ -1348,6 +1953,20 @@ def chat(
                 legend=legend,
             )
 
+            # 生成 PDF 报告（传入图片原始字节用于嵌入）
+            report_images = [
+                {"name": Path(p).name, "data": Path(p).read_bytes()}
+                for p in images
+                if Path(p).exists()
+            ]
+            report = generate_and_store_pdf_report(
+                display_answer or final_answer or raw_answer,
+                message,
+                session_id,
+                message_id=_msg_id,
+                images=report_images,
+            )
+
             return {
                 "answer": display_answer or "(empty response)",
                 "elapsed": elapsed,
@@ -1357,6 +1976,7 @@ def chat(
                 "geometry": geometry,
                 "legend": legend,
                 "trace": trace if show_trace else [],
+                "report": report,
             }
         except Exception as exc:  # noqa: BLE001
             error_text = "".join(traceback.format_exception(exc))
@@ -1430,6 +2050,12 @@ def chat_stream(
             system_prompt=system_prompt,
             title=(message.strip()[:80] or None),
         )
+        # AI 总结长输入为会话标题 (后台执行，不阻塞主流程)
+        threading.Thread(
+            target=maybe_generate_session_title,
+            args=(session_id, message),
+            daemon=True,
+        ).start()
         db.save_chat_message(
             session_id,
             "user",
@@ -1452,6 +2078,11 @@ def chat_stream(
     def generate():
         started = time.time()
         streamed_text = ""
+        # 保存 final 块的上下文，用于 for 循环结束后生成 PDF 报告
+        _final_answer_text = ""
+        _final_msg_id: int | None = None
+        _final_user_question = message
+        _final_image_paths: list[str] = []
         try:
             yield sse_event("status", {"message": "正在思考..."})
             for item in session.handle.stream(
@@ -1505,7 +2136,7 @@ def chat_stream(
                         except Exception:
                             pass
 
-                    db.save_chat_message(
+                    _final_msg_id = db.save_chat_message(
                         session_id,
                         "assistant",
                         content=final_answer or reviewed_answer or raw_answer or streamed_text,
@@ -1518,6 +2149,8 @@ def chat_stream(
                         image_files=image_files,
                         legend=legend,
                     )
+                    _final_answer_text = display_answer or final_answer or streamed_text
+                    _final_image_paths = list(images)
 
                     yield sse_event(
                         "done",
@@ -1532,6 +2165,24 @@ def chat_stream(
                             "trace": trace if show_trace else [],
                         },
                     )
+
+            # 对话结束后生成 PDF 报告
+            if _final_answer_text:
+                yield sse_event("status", {"message": "正在生成报告..."})
+                report_images = [
+                    {"name": Path(p).name, "data": Path(p).read_bytes()}
+                    for p in _final_image_paths
+                    if Path(p).exists()
+                ]
+                report = generate_and_store_pdf_report(
+                    _final_answer_text,
+                    _final_user_question,
+                    session_id,
+                    message_id=_final_msg_id,
+                    images=report_images,
+                )
+                if report:
+                    yield sse_event("report", report)
         except Exception as exc:  # noqa: BLE001
             error_text = "".join(traceback.format_exception(exc))
             matches = ERROR_MEMORY.lookup_all(error_text)
