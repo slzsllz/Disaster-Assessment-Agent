@@ -33,7 +33,7 @@ You are a geoscientist, and you need to use tools to answer multiple-choice ques
 ATTENTION:
 1. When a tool returns "Result saved at /path/to/file", you must use the full returned path "/path/to/file" in all subsequent tool calls.
 2. For each question, you must provide the choice you think is most appropriate.Don't gibe me another format. Your final answer format must be:
-<Answer>Your choice<Answer>
+<Conclusion>Your choice</Conclusion>
 '''
 
 
@@ -205,10 +205,10 @@ def extract_answer_from_response(response):
     for message in reversed(messages):
         if hasattr(message, 'type') and message.type == 'ai':
             content = message.content
-            if '<Answer>' in content and '</Answer>' in content:
+            if '<Conclusion>' in content and '</Conclusion>' in content:
                 # Extract answer between tags
-                start = content.find('<Answer>') + len('<Answer>')
-                end = content.find('</Answer>')
+                start = content.find('<Conclusion>') + len('<Conclusion>')
+                end = content.find('</Conclusion>')
                 return content[start:end].strip()
             return content
     

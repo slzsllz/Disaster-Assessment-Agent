@@ -105,16 +105,47 @@ DEFAULT_CONFIG = AGENT_DIR / next(
     ),
     "config.json",
 )
-DEFAULT_SYSTEM_PROMPT = (
-    "You are a geoscientist, and you need to use tools to answer Earth "
-    "observation questions. Carefully reason about which tools to use and "
-    "in what order. When a tool returns 'Result saved at /path/to/file', "
-    "you MUST use that full path in all subsequent tool calls. Do not list "
-    "generated output file paths in the final answer; the frontend will "
-    "display images and downloads separately. Finish your final response "
-    "with a clearly labelled answer block, e.g.:\n"
-    "<Answer>Your final answer</Answer>"
-)
+DEFAULT_SYSTEM_PROMPT = """
+You are Disaster Detection Agent, a disaster detection and remote-sensing intelligent assessment assistant.
+
+Your role is to help users analyze remote-sensing images and geospatial data for disaster detection, disaster impact assessment, and environmental risk interpretation. You can use available tools to perform specialized tasks such as earthquake building damage assessment, flood inundation extraction, wildfire burned-area change detection, landslide segmentation, oil spill detection, crop pest-affected area detection, algal bloom candidate detection, remote-sensing index calculation, geospatial statistics, and general GeoAI analysis.
+
+When answering, follow these rules:
+
+1. Understand the user's intent first.
+   - Determine which disaster or environmental phenomenon the user is asking about.
+   - Determine whether the task requires tool execution, image interpretation, file analysis, or only an explanatory answer.
+   - If the user uploads files, infer their roles from filename, content, metadata, and context when possible.
+
+2. Use tools when needed.
+   - Select the most appropriate tool according to the task type and input data.
+   - For pre/post disaster tasks, identify pre-disaster and post-disaster images carefully before calling the tool.
+   - When a tool returns 'Result saved at /path/to/file', you MUST use the full returned path in any subsequent tool calls.
+   - Do not invent results. Base quantitative conclusions on tool outputs, generated summaries, readable metadata, or attached image content.
+
+3. Interpret results like a remote-sensing disaster analyst.
+   - Summarize the key detection results clearly.
+   - Explain what the detected areas mean in practical disaster-assessment terms.
+   - Include important numbers such as area, pixel count, percentage, damage level, confidence, or class distribution when available.
+   - Mention limitations when relevant, such as model uncertainty, image quality, missing bands, cloud cover, lack of ground truth, binary-mask limitations, or index-threshold uncertainty.
+
+4. Answer style.
+   - Use Chinese by default unless the user asks otherwise.
+   - Keep the answer clear, professional, and easy to read.
+   - Do not expose local absolute file paths in the final natural-language answer.
+   - Do not merely list filenames; explain what important outputs mean and how the user can use them.
+
+5. Next-step suggestions.
+   - For every disaster detection or assessment result, you MUST end the user-facing conclusion with a section named "下一步建议", containing 1-3 concise and actionable suggestions.
+   - Suggestions must be practical, specific, and related to the current disaster type and actual analysis result, such as field verification, GIS overlay analysis, multi-temporal comparison, downloading key result files, or checking DEM, roads, population, administrative boundaries, rainfall, water level, or ground-truth data.
+   - Do not force generic suggestions when the user only asks a simple conceptual question or when next steps are not useful.
+
+Finish your final response with a clearly labelled conclusion block:
+
+<Conclusion>
+你的最终中文回答
+</Conclusion>
+""".strip()
 ARTIFACT_SELECTION_PROMPT = (
     "\n\nArtifact selection — after using a disaster tool, choose only the generated "
     "artifacts that are useful for the user. If you can judge from the tool output, "
@@ -129,7 +160,7 @@ ARTIFACT_SELECTION_PROMPT = (
     "only repeat the filename."
 )
 
-ANSWER_RE = re.compile(r"<Answer>(.*?)</Answer>", re.DOTALL | re.IGNORECASE)
+CONCLUSION_RE = re.compile(r"<Conclusion>(.*?)</Conclusion>", re.DOTALL | re.IGNORECASE)
 ARTIFACTS_RE = re.compile(r"<Artifacts>(.*?)</Artifacts>", re.DOTALL | re.IGNORECASE)
 LOCAL_PATH_RE = re.compile(r"`?(/(?:home\d*|tmp)/[^\s`*),;]+(?:\.[A-Za-z0-9]+))`?")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
@@ -205,13 +236,76 @@ def extract_final_answer(text: str) -> str:
     if not text:
         return ""
     text = ARTIFACTS_RE.sub("", text).strip()
-    match = ANSWER_RE.search(text)
+    match = CONCLUSION_RE.search(text)
     if not match:
         return text.strip()
     before = text[: match.start()].strip()
     answer = match.group(1).strip()
     after = text[match.end() :].strip()
     return "\n\n".join(part for part in (before, answer, after) if part)
+
+
+def extract_next_steps_section(text: str) -> str:
+    return extract_named_section(text, ("下一步建议",))
+
+
+def extract_named_section(text: str, titles: tuple[str, ...]) -> str:
+    if not text:
+        return ""
+    title_group = "|".join(re.escape(title) for title in titles)
+    known_following_titles = (
+        "下一步建议",
+        "文件说明",
+        "输出文件说明",
+        "可下载文件说明",
+        "下载文件说明",
+        "结果文件说明",
+        "文件用途说明",
+    )
+    stop_group = "|".join(re.escape(title) for title in known_following_titles)
+    pattern = re.compile(
+        rf"(?ims)"
+        rf"(^\s*(?:#{{1,6}}\s*)?(?:{title_group})\s*[:：]?\s*\n"
+        rf".*?)"
+        rf"(?=^\s*(?:#{{1,6}}\s*)?(?:{stop_group})\s*[:：]?\s*$|\Z)"
+    )
+    match = pattern.search(text)
+    return match.group(1).strip() if match else ""
+
+
+def extract_file_notes_section(text: str) -> str:
+    return extract_named_section(
+        text,
+        (
+            "文件说明",
+            "输出文件说明",
+            "可下载文件说明",
+            "下载文件说明",
+            "结果文件说明",
+            "文件用途说明",
+        ),
+    )
+
+
+def select_display_source_answer(raw_answer: str, reviewed_answer: str) -> str:
+    """Keep the original analysis and append only review-generated supplements."""
+    raw_final = extract_final_answer(raw_answer)
+    reviewed_final = extract_final_answer(reviewed_answer)
+    if not raw_final:
+        return reviewed_final or reviewed_answer or raw_answer
+
+    supplements: list[str] = []
+    reviewed_file_notes = extract_file_notes_section(reviewed_final)
+    if reviewed_file_notes and not extract_file_notes_section(raw_final):
+        supplements.append(reviewed_file_notes)
+
+    reviewed_next_steps = extract_next_steps_section(reviewed_final)
+    if reviewed_next_steps and not extract_next_steps_section(raw_final):
+        supplements.append(reviewed_next_steps)
+
+    if supplements:
+        return f"{raw_final.rstrip()}\n\n" + "\n\n".join(supplements)
+    return raw_final
 
 
 def file_kind(path: str) -> str:
@@ -285,9 +379,10 @@ def build_multimodal_review_content(
             "text": (
                 "Review the agent's answer, user input files, and generated tool artifacts. "
                 "Use the attached images when available. Decide which generated artifacts are actually useful "
-                "for the frontend to display or offer as downloads.\n\n"
+                "for the frontend to display or offer as downloads. The original answer is authoritative and "
+                "will be shown by the backend; do not rewrite, shorten, summarize, or repeat it.\n\n"
                 "Return exactly two blocks:\n"
-                "<Answer>你的最终中文回答。所有给用户看的解释都必须写在这个块里。不要列出本机路径；可以说明关键图像/文件会在回答底部提供。</Answer>\n"
+                "<Conclusion>只输出可追加到原始回答末尾的补充小节。如果有可下载文件，必须包含名为“文件说明”的小节，逐一解释文件内容和用途。如果这是灾害检测或评估结果，必须包含名为“下一步建议”的小节。不要重复原始回答正文。</Conclusion>\n"
                 "<Artifacts>{\"display\":[\"exact generated filename or path\"],"
                 "\"download\":[\"exact generated filename or path\"]}</Artifacts>\n\n"
                 "Rules:\n"
@@ -295,10 +390,12 @@ def build_multimodal_review_content(
                 "- download: only generated files that are useful to the user for verification, GIS, or reports.\n"
                 "- Do not include model weights, checkpoints, source files, or unhelpful intermediate artifacts.\n"
                 "- If two artifacts contain the same information, keep the clearer one.\n\n"
-                "In <Answer>, include a short section explaining the selected downloadable files. "
-                "For each file, describe what it contains and what the user can do with it "
+                "In the “文件说明” section, explain each selected downloadable file. "
+                "For each selected downloadable file, describe what it contains and what the user can do with it "
                 "(for example GIS loading, quantitative checking, report archiving, or downstream analysis). "
                 "Do not merely repeat filenames.\n\n"
+                "In the “下一步建议” section, provide 1-3 practical suggestions tied to the detected disaster "
+                "type and analysis result.\n\n"
                 "Put <Artifacts> last. Do not write any user-facing explanation after </Artifacts>.\n\n"
                 f"Original agent answer:\n{raw_answer}\n\n"
                 f"{describe_files_block('User uploaded files', uploaded_paths)}\n\n"
@@ -1819,7 +1916,7 @@ def chat(
                 uploaded_paths,
                 output_paths,
             )
-            final_answer = extract_final_answer(reviewed_answer)
+            final_answer = select_display_source_answer(raw_answer, reviewed_answer)
             display_answer = sanitize_display_answer(final_answer or reviewed_answer)
             images, output_files = choose_frontend_artifacts(reviewed_answer, output_paths)
             geometry = extract_first_output_geometry(output_paths)
@@ -2014,7 +2111,7 @@ def chat_stream(
                         uploaded_paths,
                         output_paths,
                     )
-                    final_answer = extract_final_answer(reviewed_answer)
+                    final_answer = select_display_source_answer(raw_answer or streamed_text, reviewed_answer)
                     display_answer = sanitize_display_answer(
                         final_answer or reviewed_answer or raw_answer or streamed_text
                     )

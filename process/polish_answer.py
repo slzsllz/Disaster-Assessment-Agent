@@ -29,11 +29,11 @@ Question:
 Model's Response:
 {answer}
 
-Please extract ONLY the final answer from the model's response. The answer should be in the format <Answer>X<Answer> where X is the choice (A, B, C, or D).
+Please extract ONLY the final answer from the model's response. The answer should be in the format <Conclusion>X</Conclusion> where X is the choice (A, B, C, or D).
 If the model provided multiple answers or explanations, extract only the final choice.
 If the answer contains something like "D.8.5 K higher", just extract "D".
 
-Return ONLY the answer in this exact format: <Answer>X<Answer>
+Return ONLY the answer in this exact format: <Conclusion>X</Conclusion>
 Do not include any explanation or additional text.
 Attention:
 The most important thing is:
@@ -55,14 +55,14 @@ You just need to extract the normal answer, if the "answer" has some errors, you
         result = response.json()['choices'][0]['message']['content'].strip()
         
         # Extract answer from GPT response if it's not already in the correct format
-        match = re.search(r'<Answer>([A-D])[^<]*<Answer>', result)
+        match = re.search(r'<Conclusion>([A-D])[^<]*</Conclusion>', result)
         if match:
-            return f"<Answer>{match.group(1)}<Answer>"
+            return f"<Conclusion>{match.group(1)}</Conclusion>"
         else:
             # Try to find just a letter if GPT didn't format it correctly
             match = re.search(r'\b([A-D])\b', result)
             if match:
-                return f"<Answer>{match.group(1)}<Answer>"
+                return f"<Conclusion>{match.group(1)}</Conclusion>"
             else:
                 print(f"Warning: Could not extract answer from GPT response: {result}")
                 return result
@@ -70,12 +70,12 @@ You just need to extract the normal answer, if the "answer" has some errors, you
     except Exception as e:
         print(f"Error calling GPT-4o API: {e}")
         # Fallback: try to extract answer directly from original response
-        match = re.search(r'<Answer>([^<]+)<Answer>', answer)
+        match = re.search(r'<Conclusion>([^<]+)</Conclusion>', answer)
         if match:
             # Extract just the letter if present
             letter_match = re.search(r'([A-D])', match.group(1))
             if letter_match:
-                return f"<Answer>{letter_match.group(1)}<Answer>"
+                return f"<Conclusion>{letter_match.group(1)}</Conclusion>"
         return answer
 
 
@@ -190,7 +190,7 @@ def polish_results(base_dir):
     
     # Print summary
     print(f"\nProcessed {len(polished_results)} questions")
-    success_count = sum(1 for r in polished_results if '<Answer>' in r.get('polished_answer', ''))
+    success_count = sum(1 for r in polished_results if '<Conclusion>' in r.get('polished_answer', ''))
     print(f"Successfully extracted answers: {success_count}/{len(polished_results)}")
 
 
