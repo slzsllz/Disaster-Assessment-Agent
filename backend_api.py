@@ -1014,7 +1014,8 @@ def generate_report_content(
                 "\n本次分析生成了以下图片，你可以在章节中通过字段 \"image\" 引用图片文件名"
                 "（必须完全匹配下列名称之一）以将该图片插入到该章节内容后：\n"
                 + "\n".join(f"- {n}" for n in image_names)
-                + "\n未引用图片的章节 image 字段留空。尽量在每个分析章节都引用相关图片。\n"
+                + "\n重要规则：每张图片在整个报告中只能引用一次！"
+                "请根据图片内容将其分配到最相关的章节，不要重复引用同一张图片。\n"
             )
 
         prompt = (
@@ -1064,15 +1065,20 @@ def generate_report_content(
         title = str(data.get("title", "灾害评估报告")).strip()[:50]
         summary = str(data.get("summary", "")).strip()
         valid_names = set(image_names or [])
+        used_images: set[str] = set()  # 跟踪已引用的图片，防止重复
         sections = []
         for sec in data.get("sections", []):
             heading = str(sec.get("heading", "")).strip()
             content = str(sec.get("content", "")).strip()
             img = str(sec.get("image", "")).strip()
             if heading or content:
-                # 只保留实际存在的图片名
+                # 只保留实际存在的图片名，且每张图片只引用一次
                 if img and img not in valid_names:
                     img = ""
+                if img and img in used_images:
+                    img = ""  # 去重：该图片已在前面章节引用过
+                if img:
+                    used_images.add(img)
                 sections.append({"heading": heading, "content": content, "image": img or None})
         if not sections:
             sections = [{"heading": "报告内容", "content": answer_text[:2000], "image": None}]
