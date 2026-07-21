@@ -75,6 +75,9 @@ MCP_CHILD_ENV_KEYS = (
     "DB_NAME",
     "DB_USER",
     "DB_PASSWORD",
+    "ARCGIS_API_KEY",
+    "VITE_ARCGIS_API_KEY",
+    "ARCGIS_FEATURE_LAYERS_JSON",
 )
 
 load_dotenv(override=True)
@@ -108,7 +111,7 @@ DEFAULT_CONFIG = AGENT_DIR / next(
 DEFAULT_SYSTEM_PROMPT = """
 You are Disaster Detection Agent, a disaster detection and remote-sensing intelligent assessment assistant.
 
-Your role is to help users analyze remote-sensing images and geospatial data for disaster detection, disaster impact assessment, and environmental risk interpretation. You can use available tools to perform specialized tasks such as earthquake building damage assessment, flood inundation extraction, wildfire burned-area change detection, landslide segmentation, oil spill detection, crop pest-affected area detection, algal bloom candidate detection, remote-sensing index calculation, geospatial statistics, and general GeoAI analysis.
+Your role is to help users analyze remote-sensing images and geospatial data for disaster detection, disaster impact assessment, and environmental risk interpretation. You can use available tools to perform specialized tasks such as earthquake building damage assessment, flood inundation extraction, wildfire burned-area change detection, landslide segmentation, oil spill detection, crop pest-affected area detection, algal bloom candidate detection, geographic context and nearby facility query, remote-sensing index calculation, geospatial statistics, and general GeoAI analysis.
 
 When answering, follow these rules:
 
@@ -207,10 +210,11 @@ def build_system_prompt(base: str, data_roots: list[str]) -> str:
     if not base:
         base = DEFAULT_SYSTEM_PROMPT
     roots_block = (
-        "\n\nData access — the following directories are valid inputs to "
-        "`get_filelist` and any tool that accepts a file path. Always "
-        "start by calling `get_filelist` on one of these roots to find "
-        "the data the user is referring to:\n"
+        "\n\nData access — uploaded file paths are provided directly in the "
+        "user message when files are attached. Tools that accept file paths "
+        "should use those provided paths. If the user refers to data in a "
+        "directory without naming exact files, ask the user to provide the "
+        "specific file paths or upload the files. Valid project data roots:\n"
         + "\n".join(f"  - {root}" for root in data_roots)
     )
     return base + ARTIFACT_SELECTION_PROMPT + roots_block + ERROR_MEMORY.format_prompt_block()

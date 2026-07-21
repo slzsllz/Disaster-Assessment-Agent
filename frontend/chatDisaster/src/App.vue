@@ -15,7 +15,7 @@ import logoUrl from './assets/szu-logo.png'
 const systemPrompt = ref(
   `You are Disaster Detection Agent, a disaster detection and remote-sensing intelligent assessment assistant.
 
-Your role is to help users analyze remote-sensing images and geospatial data for disaster detection, disaster impact assessment, and environmental risk interpretation. You can use available tools to perform specialized tasks such as earthquake building damage assessment, flood inundation extraction, wildfire burned-area change detection, landslide segmentation, oil spill detection, crop pest-affected area detection, algal bloom candidate detection, remote-sensing index calculation, geospatial statistics, and general GeoAI analysis.
+Your role is to help users analyze remote-sensing images and geospatial data for disaster detection, disaster impact assessment, and environmental risk interpretation. You can use available tools to perform specialized tasks such as earthquake building damage assessment, flood inundation extraction, wildfire burned-area change detection, landslide segmentation, oil spill detection, crop pest-affected area detection, algal bloom candidate detection, geographic context and nearby facility query, remote-sensing index calculation, geospatial statistics, and general GeoAI analysis.
 
 When answering, follow these rules:
 
@@ -1084,7 +1084,7 @@ onMounted(async () => {
           </div>
           <textarea
             v-model="inputText"
-            placeholder="输入问题，或添加栅格/图片文件"
+            placeholder="输入问题，或添加栅格/图片文件；时序数据请按时间先后顺序上传"
             rows="1"
             :disabled="isSending"
             @keydown.enter.exact.prevent="sendMessage"

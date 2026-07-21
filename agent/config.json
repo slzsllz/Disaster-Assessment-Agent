@@ -32,14 +32,6 @@
                 "tmp/tmp/out"
             ]
         },
-        "Statistics": {
-            "command": "python",
-            "args": [
-                "tools/Statistics.py",
-                "--temp_dir",
-                "tmp/tmp/out"
-            ]
-        },
         "DamageAssessment": {
             "command": "python",
             "args": [
@@ -60,6 +52,14 @@
             "command": "python",
             "args": [
                 "tools/FireBurnedAreaChange.py",
+                "--temp_dir",
+                "tmp/tmp/out"
+            ]
+        },
+        "GeoContextQuery": {
+            "command": "python",
+            "args": [
+                "tools/GeoContextQuery.py",
                 "--temp_dir",
                 "tmp/tmp/out"
             ]
