@@ -852,10 +852,7 @@ onMounted(async () => {
 
     <aside class="sidebar">
       <img class="sidebar-logo" :src="logoUrl" alt="深圳大学" />
-      <div class="sidebar-title" aria-label="灾害检测智能体">
-        <span aria-hidden="true">灾害检测智能体</span>
-        <span aria-hidden="true">灾害检测智能体</span>
-      </div>
+      <div class="sidebar-title">灾害检测助手</div>
 
       <section class="sidebar-section">
         <h2>高级设置</h2>

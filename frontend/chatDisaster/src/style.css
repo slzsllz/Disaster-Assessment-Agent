@@ -238,45 +238,13 @@ button {
 }
 
 .sidebar-title {
-  position: relative;
   width: calc(100% - 4.9rem);
-  min-height: 2.35rem;
   margin-bottom: 1rem;
   color: #111827;
   font-size: 1.9rem;
   font-weight: 700;
   line-height: 1.15;
-}
-
-.sidebar-title span {
-  position: absolute;
-  inset: 0;
-  display: inline-block;
-  white-space: nowrap;
-}
-
-.sidebar-title span:first-child {
-  color: transparent;
-  -webkit-text-stroke: 1px #111827;
-  text-stroke: 1px #111827;
-}
-
-.sidebar-title span:last-child {
-  color: #111827;
-  animation: title-wave 4s ease-in-out infinite;
-}
-
-@keyframes title-wave {
-  0%,
-  100% {
-    -webkit-clip-path: polygon(0 52%, 14% 70%, 36% 72%, 54% 60%, 76% 66%, 100% 48%, 100% 100%, 0 100%);
-    clip-path: polygon(0 52%, 14% 70%, 36% 72%, 54% 60%, 76% 66%, 100% 48%, 100% 100%, 0 100%);
-  }
-
-  50% {
-    -webkit-clip-path: polygon(0 56%, 14% 38%, 34% 52%, 58% 42%, 78% 58%, 100% 46%, 100% 100%, 0 100%);
-    clip-path: polygon(0 56%, 14% 38%, 34% 52%, 58% 42%, 78% 58%, 100% 46%, 100% 100%, 0 100%);
-  }
+  letter-spacing: 0;
 }
 
 .sidebar-section {
