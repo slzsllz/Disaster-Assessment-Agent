@@ -136,33 +136,16 @@ When answering, follow these rules:
    - Use Chinese by default unless the user asks otherwise.
    - Keep the answer clear, professional, and easy to read.
    - Do not expose local absolute file paths in the final natural-language answer.
-   - Do not merely list filenames; explain what important outputs mean and how the user can use them.
-
-5. Next-step suggestions.
-   - For every disaster detection or assessment result, you MUST end the user-facing conclusion with a section named "下一步建议", containing 1-3 concise and actionable suggestions.
-   - Suggestions must be practical, specific, and related to the current disaster type and actual analysis result, such as field verification, GIS overlay analysis, multi-temporal comparison, downloading key result files, or checking DEM, roads, population, administrative boundaries, rainfall, water level, or ground-truth data.
-   - Do not force generic suggestions when the user only asks a simple conceptual question or when next steps are not useful.
+   - The first-pass answer should focus only on the main disaster analysis and conclusion.
+   - Do not include "文件说明", "输出文件", "可下载文件", or similar file-list sections in the first-pass answer.
+   - Do not force a "下一步建议" section in the first-pass answer; follow-up suggestions will be added by the second-pass multimodal review when useful.
 
 Finish your final response with a clearly labelled conclusion block:
 
 <Conclusion>
-你的最终中文回答
+你的灾害检测主体分析和结论
 </Conclusion>
 """.strip()
-ARTIFACT_SELECTION_PROMPT = (
-    "\n\nArtifact selection — after using a disaster tool, choose only the generated "
-    "artifacts that are useful for the user. If you can judge from the tool output, "
-    "include an optional machine-readable block after the answer:\n"
-    "<Artifacts>{\"display\":[\"useful image filename or path\"],"
-    "\"download\":[\"useful file filename or path\"]}</Artifacts>\n"
-    "Do not select every generated intermediate file by default. Prefer one clear "
-    "overlay/diagnostic image for display and only downloadable GIS/report files "
-    "that help the user verify or reuse the result. In the final answer, explain "
-    "each selected downloadable file in user-facing terms: what it contains, what "
-    "the user can do with it, and which software/workflow it is useful for. Do not "
-    "only repeat the filename."
-)
-
 CONCLUSION_RE = re.compile(r"<Conclusion>(.*?)</Conclusion>", re.DOTALL | re.IGNORECASE)
 ARTIFACTS_RE = re.compile(r"<Artifacts>(.*?)</Artifacts>", re.DOTALL | re.IGNORECASE)
 LOCAL_PATH_RE = re.compile(r"`?(/(?:home\d*|tmp)/[^\s`*),;]+(?:\.[A-Za-z0-9]+))`?")
@@ -217,7 +200,7 @@ def build_system_prompt(base: str, data_roots: list[str]) -> str:
         "specific file paths or upload the files. Valid project data roots:\n"
         + "\n".join(f"  - {root}" for root in data_roots)
     )
-    return base + ARTIFACT_SELECTION_PROMPT + roots_block + ERROR_MEMORY.format_prompt_block()
+    return base + roots_block + ERROR_MEMORY.format_prompt_block()
 
 
 def sanitize_local_paths(text: str) -> str:
@@ -243,10 +226,7 @@ def extract_final_answer(text: str) -> str:
     match = CONCLUSION_RE.search(text)
     if not match:
         return text.strip()
-    before = text[: match.start()].strip()
-    answer = match.group(1).strip()
-    after = text[match.end() :].strip()
-    return "\n\n".join(part for part in (before, answer, after) if part)
+    return match.group(1).strip()
 
 
 def extract_next_steps_section(text: str) -> str:
@@ -381,17 +361,19 @@ def build_multimodal_review_content(
         {
             "type": "text",
             "text": (
-                "Review the agent's answer, user input files, and generated tool artifacts. "
-                "Use the attached images when available. Decide which generated artifacts are actually useful "
-                "for the frontend to display or offer as downloads. The original answer is authoritative and "
-                "will be shown by the backend; do not rewrite, shorten, summarize, or repeat it.\n\n"
+                "This is the second-pass review after the main disaster-analysis answer has already been written. "
+                "Analyze the user input files and generated tool artifacts as a disaster remote-sensing assistant. "
+                "Use multimodal visual understanding for attached images, overlays, masks, figures, charts, and previews. "
+                "Decide which generated artifacts are actually useful for the frontend to display or offer as downloads. "
+                "The original answer is authoritative and will be shown by the backend; do not rewrite, shorten, "
+                "summarize, or repeat it.\n\n"
                 "Return exactly two blocks:\n"
-                "<Conclusion>只输出可追加到原始回答末尾的补充小节。如果有可下载文件，必须包含名为“文件说明”的小节，逐一解释文件内容和用途。如果这是灾害检测或评估结果，必须包含名为“下一步建议”的小节。不要重复原始回答正文。</Conclusion>\n"
+                "<Conclusion>只输出可追加到原始回答末尾的补充小节。不要写灾害检测主体分析，不要重述原始回答。如果有可下载文件，必须包含名为“文件说明”的小节，逐一解释文件内容和用途。如果这是灾害检测或评估结果，必须包含名为“下一步建议”的小节。</Conclusion>\n"
                 "<Artifacts>{\"display\":[\"exact generated filename or path\"],"
                 "\"download\":[\"exact generated filename or path\"]}</Artifacts>\n\n"
                 "Rules:\n"
-                "- display: only generated images that are useful for visual inspection.\n"
-                "- download: only generated files that are useful to the user for verification, GIS, or reports.\n"
+                "- display: only generated images that are useful for visual inspection by the user.\n"
+                "- download: only generated files that are useful to the user for verification, GIS, reports, or downstream analysis.\n"
                 "- Do not include model weights, checkpoints, source files, or unhelpful intermediate artifacts.\n"
                 "- If two artifacts contain the same information, keep the clearer one.\n\n"
                 "In the “文件说明” section, explain each selected downloadable file. "
@@ -868,9 +850,12 @@ class AgentHandle:
             messages = [
                 SystemMessage(
                     content=(
-                        "You are a careful geospatial result reviewer. Use multimodal image understanding "
-                        "when images are attached. Improve the final Chinese answer and select only useful "
-                        "generated artifacts for display/download. Never expose local absolute paths to users."
+                        "You are a disaster remote-sensing multimodal reviewer. Inspect the user's uploaded "
+                        "files and generated tool artifacts as a disaster-assessment assistant. Use visual "
+                        "understanding for attached images, maps, overlays, masks, charts, and previews. "
+                        "Your job is only to choose useful frontend artifacts and append file/suggestion "
+                        "supplements. Never rewrite, summarize, or repeat the main disaster-analysis answer. "
+                        "Never expose local absolute paths to users."
                     )
                 ),
                 HumanMessage(
