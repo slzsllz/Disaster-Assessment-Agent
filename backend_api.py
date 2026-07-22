@@ -964,12 +964,20 @@ def maybe_generate_session_title(session_id: str, message: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# AI-powered PDF report generation -- after each conversation the LLM
-# summarises the answer into a structured report which is rendered as a
-# downloadable PDF using reportlab (with CJK font support).
+# AI-powered PDF report generation -- generated only when the user explicitly
+# asks for a report (message contains "生成报告"). The LLM summarises the
+# answer into a structured report rendered as a downloadable PDF using
+# reportlab (with CJK font support).
 # ---------------------------------------------------------------------------
 import io as _io  # noqa: E402  (local import to avoid top-level clutter)
+
+
 from datetime import datetime as _datetime  # noqa: E402
+
+
+def should_generate_report(user_message: str) -> bool:
+    """Return True when the user explicitly requests a PDF report."""
+    return "生成报告" in (user_message or "")
 
 _CJK_FONT_REGISTERED = False
 
@@ -1862,19 +1870,21 @@ def chat(
                 legend=legend,
             )
 
-            # 生成 PDF 报告（传入图片原始字节用于嵌入）
-            report_images = [
-                {"name": Path(p).name, "data": Path(p).read_bytes()}
-                for p in images
-                if Path(p).exists()
-            ]
-            report = generate_and_store_pdf_report(
-                display_answer or final_answer or raw_answer,
-                message,
-                session_id,
-                message_id=_msg_id,
-                images=report_images,
-            )
+            # 生成 PDF 报告（仅在用户明确要求时生成）
+            report = None
+            if should_generate_report(message):
+                report_images = [
+                    {"name": Path(p).name, "data": Path(p).read_bytes()}
+                    for p in images
+                    if Path(p).exists()
+                ]
+                report = generate_and_store_pdf_report(
+                    display_answer or final_answer or raw_answer,
+                    message,
+                    session_id,
+                    message_id=_msg_id,
+                    images=report_images,
+                )
 
             return {
                 "answer": display_answer or "(empty response)",
@@ -2075,8 +2085,8 @@ def chat_stream(
                         },
                     )
 
-            # 对话结束后生成 PDF 报告
-            if _final_answer_text:
+            # 对话结束后生成 PDF 报告（仅在用户明确要求时生成）
+            if _final_answer_text and should_generate_report(_final_user_question):
                 yield sse_event("status", {"message": "正在生成报告..."})
                 report_images = [
                     {"name": Path(p).name, "data": Path(p).read_bytes()}
