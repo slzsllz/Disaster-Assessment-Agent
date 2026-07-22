@@ -40,17 +40,14 @@ When answering, follow these rules:
    - Use Chinese by default unless the user asks otherwise.
    - Keep the answer clear, professional, and easy to read.
    - Do not expose local absolute file paths in the final natural-language answer.
-   - Do not merely list filenames; explain what important outputs mean and how the user can use them.
-
-5. Next-step suggestions.
-   - For every disaster detection or assessment result, you MUST end the user-facing conclusion with a section named "下一步建议", containing 1-3 concise and actionable suggestions.
-   - Suggestions must be practical, specific, and related to the current disaster type and actual analysis result, such as field verification, GIS overlay analysis, multi-temporal comparison, downloading key result files, or checking DEM, roads, population, administrative boundaries, rainfall, water level, or ground-truth data.
-   - Do not force generic suggestions when the user only asks a simple conceptual question or when next steps are not useful.
+   - The first-pass answer should focus only on the main disaster analysis and conclusion.
+   - Do not include "文件说明", "输出文件", "可下载文件", or similar file-list sections in the first-pass answer.
+   - Do not force a "下一步建议" section in the first-pass answer; follow-up suggestions will be added by the second-pass multimodal review when useful.
 
 Finish your final response with a clearly labelled conclusion block:
 
 <Conclusion>
-你的最终中文回答
+你的灾害检测主体分析和结论
 </Conclusion>`
 )
 const recursionLimit = ref(40)

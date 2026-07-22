@@ -29,8 +29,8 @@ Returns:
 
 Answer guidance:
 - Return all generated output paths in the tool result, but do not assume every output is useful to the user.
-- The language model should inspect the tool result and choose which images are useful for frontend display and which files are useful downloads via the final <Artifacts> block.
-- For each selected downloadable file, explain what it contains and how the user can use it, e.g. GIS overlay, quantitative summary, or downstream verification.
+- The second-pass multimodal reviewer will inspect the tool outputs and choose which images are useful for frontend display and which files are useful downloads.
+- The first-pass answer should focus on the flood-inundation result, not on listing or explaining output files.
 - Do not repeat or list output file paths in the final natural-language answer.
 """
 
