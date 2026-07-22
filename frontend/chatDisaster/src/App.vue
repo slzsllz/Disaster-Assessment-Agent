@@ -59,7 +59,7 @@ const sidebarOpen = ref(true)
 const mapDrawerOpen = ref(false)
 const isSending = ref(false)
 const conversationHistory = ref([])
-const sessionId = ref(crypto.randomUUID())
+const sessionId = ref(readSessionIdFromUrl() || crypto.randomUUID())
 const messages = ref([])
 const chatContentRef = ref(null)
 const showScrollBottom = ref(false)
@@ -89,6 +89,28 @@ function closePdfPreview() {
 }
 
 const hasMessages = computed(() => messages.value.length > 0)
+
+function readSessionIdFromUrl() {
+  try {
+    return new URL(window.location.href).searchParams.get('session_id') || ''
+  } catch {
+    return ''
+  }
+}
+
+function writeSessionIdToUrl(id) {
+  try {
+    const url = new URL(window.location.href)
+    if (id) {
+      url.searchParams.set('session_id', id)
+    } else {
+      url.searchParams.delete('session_id')
+    }
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
+  } catch {
+    // URL state is a convenience for refresh recovery; ignore unsupported environments.
+  }
+}
 
 // 按更新时间排序（从新到旧）
 const sortedConversationHistory = computed(() => {
@@ -394,6 +416,7 @@ function startNewConversation() {
   messages.value = []
   showScrollBottom.value = false
   sessionId.value = crypto.randomUUID()
+  writeSessionIdToUrl('')
   clearMapGeometry()
 }
 
@@ -401,6 +424,7 @@ async function openConversation(conversation) {
   if (conversation.id === sessionId.value) return
   releasePendingFiles()
   sessionId.value = conversation.id
+  writeSessionIdToUrl(conversation.id)
   messages.value = []
   const fetched = await fetchMessages(conversation.id)
   if (fetched && fetched.length) {
@@ -688,6 +712,7 @@ async function sendMessage() {
   if (!text && attachments.value.length === 0) return
 
   const localAttachments = [...attachments.value]
+  writeSessionIdToUrl(sessionId.value)
   messages.value.push({
     id: crypto.randomUUID(),
     role: 'user',
@@ -798,6 +823,18 @@ async function sendMessage() {
 onMounted(async () => {
   // 用数据库会话刷新历史侧栏。
   await fetchSessions()
+  const urlSessionId = readSessionIdFromUrl()
+  if (!urlSessionId) return
+
+  sessionId.value = urlSessionId
+  const fetched = await fetchMessages(urlSessionId)
+  if (fetched) {
+    messages.value = fetched
+  }
+  const hasGeometry = await showLatestSessionGeometry()
+  if (!hasGeometry) clearMapGeometry()
+  showScrollBottom.value = false
+  scrollToBottom()
 })
 
 </script>
