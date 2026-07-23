@@ -299,7 +299,12 @@ def extract_file_notes_section(text: str) -> str:
     )
 
 
-def select_display_source_answer(raw_answer: str, reviewed_answer: str) -> str:
+def select_display_source_answer(
+    raw_answer: str,
+    reviewed_answer: str,
+    include_file_notes: bool = True,
+    include_next_steps: bool = True,
+) -> str:
     """Keep the original analysis and append only review-generated supplements."""
     raw_final = extract_final_answer(raw_answer)
     reviewed_final = extract_final_answer(reviewed_answer)
@@ -307,11 +312,11 @@ def select_display_source_answer(raw_answer: str, reviewed_answer: str) -> str:
         return reviewed_final or reviewed_answer or raw_answer
 
     supplements: list[str] = []
-    reviewed_file_notes = extract_file_notes_section(reviewed_final)
+    reviewed_file_notes = extract_file_notes_section(reviewed_final) if include_file_notes else ""
     if reviewed_file_notes and not extract_file_notes_section(raw_final):
         supplements.append(reviewed_file_notes)
 
-    reviewed_next_steps = extract_next_steps_section(reviewed_final)
+    reviewed_next_steps = extract_next_steps_section(reviewed_final) if include_next_steps else ""
     if reviewed_next_steps and not extract_next_steps_section(raw_final):
         supplements.append(reviewed_next_steps)
 
@@ -624,10 +629,10 @@ def extract_tool_output_files(response: dict) -> list[str]:
             for item in obj:
                 visit(item, collect_strings)
         elif isinstance(obj, str):
+            for match in LOCAL_PATH_RE.findall(obj):
+                add_path(match)
             if collect_strings:
                 add_path(obj)
-                for match in LOCAL_PATH_RE.findall(obj):
-                    add_path(match)
             try:
                 visit(json.loads(obj), collect_strings)
             except Exception:
@@ -1947,11 +1952,16 @@ def chat(
                 uploaded_paths,
                 output_paths,
             )
-            final_answer = select_display_source_answer(raw_answer, reviewed_answer)
-            display_answer = sanitize_display_answer(final_answer or reviewed_answer)
             images, output_files = choose_frontend_artifacts(reviewed_answer, output_paths)
+            final_answer = select_display_source_answer(
+                raw_answer,
+                reviewed_answer,
+                include_file_notes=bool(output_files),
+                include_next_steps=True,
+            )
+            display_answer = sanitize_display_answer(final_answer or reviewed_answer)
             geometry = extract_first_output_geometry(output_paths)
-            legend = extract_tool_legend(response)
+            legend = extract_tool_legend(response) if images else []
 
             session.messages.append(
                 {"role": "assistant", "content": final_answer or reviewed_answer or raw_answer}
@@ -2144,13 +2154,18 @@ def chat_stream(
                         uploaded_paths,
                         output_paths,
                     )
-                    final_answer = select_display_source_answer(raw_answer or streamed_text, reviewed_answer)
+                    images, output_files = choose_frontend_artifacts(reviewed_answer, output_paths)
+                    final_answer = select_display_source_answer(
+                        raw_answer or streamed_text,
+                        reviewed_answer,
+                        include_file_notes=bool(output_files),
+                        include_next_steps=True,
+                    )
                     display_answer = sanitize_display_answer(
                         final_answer or reviewed_answer or raw_answer or streamed_text
                     )
-                    images, output_files = choose_frontend_artifacts(reviewed_answer, output_paths)
                     geometry = extract_first_output_geometry(output_paths)
-                    legend = extract_tool_legend(response)
+                    legend = extract_tool_legend(response) if images else []
 
                     session.messages.append(
                         {"role": "assistant", "content": final_answer or reviewed_answer or raw_answer or streamed_text}
