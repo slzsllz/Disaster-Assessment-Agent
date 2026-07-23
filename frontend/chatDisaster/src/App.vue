@@ -57,6 +57,7 @@ const maxExecutionTime = ref(600)
 const showTrace = ref(false)
 const inputText = ref('')
 const attachments = ref([])
+const fileInputRef = ref(null)
 const sidebarOpen = ref(true)
 const mapDrawerOpen = ref(false)
 const isSending = ref(false)
@@ -411,6 +412,13 @@ function releasePendingFiles() {
     if (item.preview) URL.revokeObjectURL(item.preview)
   })
   attachments.value = []
+  resetFileInput()
+}
+
+function resetFileInput() {
+  if (fileInputRef.value) {
+    fileInputRef.value.value = ''
+  }
 }
 
 function startNewConversation() {
@@ -600,6 +608,7 @@ function handleFiles(event) {
     type: file.type,
     preview: previewableImageTypes.has(file.type) ? URL.createObjectURL(file) : '',
   }))
+  resetFileInput()
 }
 
 function clearAttachment(id) {
@@ -1099,7 +1108,7 @@ onMounted(async () => {
       <form class="composer" @submit.prevent="sendMessage">
         <label class="upload-button" title="添加文件">
           <Plus />
-          <input multiple type="file" @change="handleFiles" />
+          <input ref="fileInputRef" multiple type="file" @change="handleFiles" />
         </label>
 
         <div class="composer-main">
