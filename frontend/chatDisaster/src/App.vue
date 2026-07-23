@@ -327,14 +327,14 @@ function resultImageCaption(image) {
 }
 
 function imageLegendItems(image, message) {
+  if (!message.legend?.length) return []
   const lower = String(image?.name || '').toLowerCase()
-  if (lower.includes('ndci_bloom_overlay')) return message.legend || []
-  return []
-}
-
-function hasDetachedLegend(message) {
-  if (!message.legend?.length) return false
-  return !(message.images || []).some((image) => imageLegendItems(image, message).length)
+  const canExplainLegend = [
+    'overlay',
+    'comparison',
+    'vis',
+  ].some((marker) => lower.includes(marker))
+  return canExplainLegend ? message.legend : []
 }
 
 // ---------------------------------------------------------------------------
@@ -1053,16 +1053,6 @@ onMounted(async () => {
                   </span>
                 </div>
               </figure>
-            </div>
-            <div v-if="hasDetachedLegend(message)" class="result-legend">
-              <span
-                v-for="item in message.legend"
-                :key="`${item.label}-${item.color}`"
-                class="legend-item"
-              >
-                <i :style="{ backgroundColor: item.color }" />
-                <span>{{ item.label }}</span>
-              </span>
             </div>
             <div v-if="message.report" class="report-card">
               <div class="report-card-icon">
