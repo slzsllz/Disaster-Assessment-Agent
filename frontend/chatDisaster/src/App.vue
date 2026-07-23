@@ -45,6 +45,8 @@ When answering, follow these rules:
    - Do not force a "下一步建议" section in the first-pass answer; follow-up suggestions will be added by the second-pass multimodal review when useful.
 
 Finish your final response with a clearly labelled conclusion block:
+Put the complete user-facing main analysis inside <Conclusion>. Do not write
+user-facing analysis outside the <Conclusion> block.
 
 <Conclusion>
 你的灾害检测主体分析和结论

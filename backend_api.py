@@ -141,6 +141,8 @@ When answering, follow these rules:
    - Do not force a "下一步建议" section in the first-pass answer; follow-up suggestions will be added by the second-pass multimodal review when useful.
 
 Finish your final response with a clearly labelled conclusion block:
+Put the complete user-facing main analysis inside <Conclusion>. Do not write
+user-facing analysis outside the <Conclusion> block.
 
 <Conclusion>
 你的灾害检测主体分析和结论
@@ -226,7 +228,33 @@ def extract_final_answer(text: str) -> str:
     match = CONCLUSION_RE.search(text)
     if not match:
         return text.strip()
-    return match.group(1).strip()
+    conclusion = match.group(1).strip()
+    outside = "\n\n".join(
+        part
+        for part in (
+            text[: match.start()].strip(),
+            text[match.end() :].strip(),
+        )
+        if part
+    ).strip()
+    if not outside:
+        return conclusion
+    if not conclusion:
+        return outside
+
+    outside_norm = re.sub(r"\s+", "", outside)
+    conclusion_norm = re.sub(r"\s+", "", conclusion)
+    if outside_norm in conclusion_norm:
+        return conclusion
+    if conclusion_norm in outside_norm:
+        return outside
+
+    # Some models put the detailed analysis before the tag and only a short
+    # summary inside <Conclusion>. Keep the richer main answer in that case so
+    # the final SSE "done" event does not collapse the visible streamed answer.
+    if len(outside) >= 180 and len(outside) > len(conclusion) * 1.35:
+        return outside
+    return conclusion
 
 
 def extract_next_steps_section(text: str) -> str:
