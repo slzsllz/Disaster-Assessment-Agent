@@ -1,0 +1,49 @@
+# Disaster-Assessment-Agent 后端服务镜像
+# 基于 conda 环境安装 GDAL/PyTorch/LangChain 等重依赖
+
+FROM continuumio/miniconda3:latest
+
+WORKDIR /app
+
+# 1. 安装系统依赖（GDAL 编译、字体等）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. 复制环境定义并创建 conda 环境（利用 Docker 缓存层）
+COPY docker/environment.yml /tmp/environment.yml
+RUN conda env create -f /tmp/environment.yml -n earthagent_cpython && \
+    conda clean -afy
+
+# 3. 设置环境变量，使后续命令默认使用 conda 环境
+ENV CONDA_DEFAULT_ENV=earthagent_cpython
+ENV CONDA_PREFIX=/opt/conda/envs/earthagent_cpython
+ENV PATH=${CONDA_PREFIX}/bin:${PATH}
+ENV PYTHONUNBUFFERED=1
+ENV PROJ_DATA=${CONDA_PREFIX}/share/proj
+ENV PROJ_LIB=${CONDA_PREFIX}/share/proj
+ENV GDAL_DATA=${CONDA_PREFIX}/share/gdal
+
+# 4. 复制项目代码
+COPY backend_api.py config_utils.py ./
+COPY agent ./agent
+COPY scripts ./scripts
+COPY process ./process
+COPY benchmark ./benchmark
+COPY imgs ./imgs
+COPY user_img ./user_img
+
+# 5. 创建持久化目录挂载点
+RUN mkdir -p /app/model /app/tmp /app/data
+
+# 6. 暴露后端端口
+EXPOSE 8000
+
+# 7. 启动后端服务
+CMD ["uvicorn", "backend_api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

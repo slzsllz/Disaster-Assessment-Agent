@@ -1,0 +1,71 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: disaster_agent_db
+    restart: unless-stopped
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    environment:
+      POSTGRES_USER: ${DB_USER:-disaster_agent}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-disaster_agent_pwd}
+      POSTGRES_DB: ${DB_NAME:-disaster_agent}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-disaster_agent} -d ${DB_NAME:-disaster_agent}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: disaster_agent_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      AGENT_CONFIG: ${AGENT_CONFIG:-config_deploy.json}
+      QWEN_API_KEY: ${QWEN_API_KEY}
+      QWEN_BASE_URL: ${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      QWEN_MODEL_NAME: ${QWEN_MODEL_NAME:-qwen3.7-plus}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      ARCGIS_API_KEY: ${ARCGIS_API_KEY}
+      DB_ENABLED: "true"
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-disaster_agent}
+      DB_USER: ${DB_USER:-disaster_agent}
+      DB_PASSWORD: ${DB_PASSWORD:-disaster_agent_pwd}
+      DB_PORT_EXTERNAL: ${DB_PORT:-5433}
+    volumes:
+      # 模型权重挂载到容器内 /app/model
+      - ${MODEL_DIR:-../model}:/app/model:ro
+      # 临时输出目录（评估结果、上传文件）
+      - backend_tmp:/app/tmp
+      # 持久化错误记忆等数据
+      - backend_data:/app/data
+    command: ["uvicorn", "backend_api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    container_name: disaster_agent_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+
+volumes:
+  pg_data:
+  backend_tmp:
+  backend_data:
