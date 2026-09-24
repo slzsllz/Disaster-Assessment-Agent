@@ -36,6 +36,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from agent.error_memory import ErrorMemory
 from agent.error_feedback import ToolErrorFeedback
+from agent.tool_router import ToolRouter
+from agent.tool_policy import CURATED_TOOLS_BY_SERVER, CURATED_TOOL_NAMES, select_curated_tools
 from agent.db import db
 
 
@@ -110,6 +112,7 @@ DEFAULT_CONFIG = AGENT_DIR / next(
     ),
     "config.json",
 )
+AVAILABLE_MCP_SERVERS = tuple(CURATED_TOOLS_BY_SERVER)
 DEFAULT_SYSTEM_PROMPT = """
 You are Disaster Detection Agent, a disaster detection and remote-sensing intelligent assessment assistant.
 
@@ -566,23 +569,21 @@ def message_content_text(content: Any) -> str:
 
 def tool_trace(response: dict) -> list[dict[str, Any]]:
     trace: list[dict[str, Any]] = []
-    pending: dict[str, Any] | None = None
+    pending: dict[str, dict[str, Any]] = {}
     for msg in response.get("messages", []):
         if isinstance(msg, AIMessage):
-            extra = getattr(msg, "additional_kwargs", {}) or {}
-            for call in extra.get("tool_calls") or []:
-                fn = call.get("function", {}) or {}
-                args_raw = fn.get("arguments", "")
-                try:
-                    args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
-                except Exception:
-                    args = args_raw
-                pending = {"name": fn.get("name", "?"), "args": args, "result": None}
+            for call in msg.tool_calls:
+                pending[call.get("id", "")] = {
+                    "name": call.get("name", "?"),
+                    "args": call.get("args"),
+                    "result": None,
+                }
         elif isinstance(msg, ToolMessage):
-            entry = pending or {"name": getattr(msg, "name", "?"), "args": None}
+            entry = pending.pop(msg.tool_call_id, None) or {
+                "name": getattr(msg, "name", "?"), "args": None,
+            }
             entry["result"] = str(msg.content)[:500]
             trace.append(entry)
-            pending = None
     return trace
 
 
@@ -781,6 +782,16 @@ def load_model_config(config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     if not cfg.get("models"):
         raise RuntimeError(f"No models configured in {config_path}")
     model = cfg["models"][0]
+    mcp_servers = {
+        name: settings for name, settings in cfg.get("mcpServers", {}).items()
+        if name in CURATED_TOOLS_BY_SERVER
+    }
+    # Only reviewed servers are started. Config entries retain custom args.
+    for name in AVAILABLE_MCP_SERVERS:
+        if (AGENT_DIR / "tools" / f"{name}.py").is_file():
+            mcp_servers.setdefault(name, {
+                "args": [f"tools/{name}.py", "--temp_dir", "tmp/tmp/out"]
+            })
     api_key = substitute_env(model.get("api_key", "") or "")
     base_url = substitute_env((model.get("client_args") or {}).get("base_url", "") or "")
     qwen35_key = os.getenv("QWEN35_API_KEY")
@@ -791,7 +802,7 @@ def load_model_config(config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
             "api_key": qwen35_key,
             "base_url": os.getenv("QWEN_SERVER_URL", "http://172.31.233.78:8001/v1"),
             "generate_args": {},
-            "mcp_servers": cfg.get("mcpServers", {}),
+            "mcp_servers": mcp_servers,
         }
     return {
         "path": str(config_path),
@@ -799,7 +810,7 @@ def load_model_config(config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
         "api_key": api_key,
         "base_url": base_url,
         "generate_args": model.get("generate_args", {}) or {},
-        "mcp_servers": cfg.get("mcpServers", {}),
+        "mcp_servers": mcp_servers,
     }
 
 
@@ -869,9 +880,17 @@ class AgentHandle:
             client = MultiServerMCPClient(
                 build_mcp_servers(config["mcp_servers"], temp_dir, session_id)
             )
-            tools = await client.get_tools()
+            tools = select_curated_tools(await client.get_tools())
+            router = ToolRouter(llm, tools)
             feedback = ToolErrorFeedback(ERROR_MEMORY, db=db)
-            agent = create_react_agent(llm, tools, pre_model_hook=feedback.before_model)
+
+            async def select_model(state, runtime):
+                selected = await router.select(state.get("messages", []))
+                return llm.bind_tools(selected) if selected else llm
+
+            agent = create_react_agent(
+                select_model, tools, pre_model_hook=feedback.before_model
+            )
             return agent, llm, client, tools
 
         self.agent, self.llm, self.client, self.tools = self.run(setup())
@@ -1788,6 +1807,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "model": MODEL_CONFIG["model_name"],
         "tools": list(MODEL_CONFIG["mcp_servers"].keys()),
+        "enabled_tool_count": len(CURATED_TOOL_NAMES),
         "db_ok": db.health_check(),
     }
 
