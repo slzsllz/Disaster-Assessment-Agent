@@ -603,6 +603,47 @@ class Database:
             logger.warning("increment_error_hit failed: %s", exc)
             return False
 
+    def save_error_recovery_candidate(
+        self,
+        tool_name: str,
+        error_signature: str,
+        error_hash: str,
+        changed_fields: list[str],
+    ) -> bool:
+        """Store verified retry evidence for review, not as an active rule."""
+        if not self._ensure_pool():
+            return False
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """CREATE TABLE IF NOT EXISTS error_recovery_candidates (
+                           id BIGSERIAL PRIMARY KEY,
+                           tool_name TEXT NOT NULL,
+                           error_signature TEXT NOT NULL,
+                           error_hash TEXT NOT NULL,
+                           changed_fields JSONB NOT NULL,
+                           occurrences INTEGER NOT NULL DEFAULT 1,
+                           status TEXT NOT NULL DEFAULT 'pending',
+                           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                           UNIQUE (tool_name, error_hash, changed_fields)
+                       )"""
+                )
+                cur.execute(
+                    """INSERT INTO error_recovery_candidates
+                           (tool_name, error_signature, error_hash, changed_fields)
+                           VALUES (%s, %s, %s, %s)
+                           ON CONFLICT (tool_name, error_hash, changed_fields)
+                           DO UPDATE SET occurrences = error_recovery_candidates.occurrences + 1,
+                                         updated_at = now()""",
+                    (tool_name, error_signature, error_hash, Jsonb(changed_fields)),
+                )
+                conn.commit()
+                return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("save_error_recovery_candidate failed: %s", exc)
+            return False
+
     # ==================================================================
     # 通用辅助
     # ==================================================================

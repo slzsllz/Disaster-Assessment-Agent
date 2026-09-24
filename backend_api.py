@@ -35,6 +35,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent.error_memory import ErrorMemory
+from agent.error_feedback import ToolErrorFeedback
 from agent.db import db
 
 
@@ -94,7 +95,7 @@ AGENT_DIR = PROJECT_ROOT / "agent"
 BENCHMARK_DATA_DIR = PROJECT_ROOT / "benchmark" / "data"
 TEMP_BASE = PROJECT_ROOT / "tmp" / "fastapi_out"
 TEMP_BASE.mkdir(parents=True, exist_ok=True)
-ERROR_MEMORY = ErrorMemory(AGENT_DIR / "error_memory.json")
+ERROR_MEMORY = ErrorMemory(AGENT_DIR / "error_memory.json", db=db)
 
 DEFAULT_CONFIG = AGENT_DIR / next(
     (
@@ -204,7 +205,7 @@ def build_system_prompt(base: str, data_roots: list[str]) -> str:
         "specific file paths or upload the files. Valid project data roots:\n"
         + "\n".join(f"  - {root}" for root in data_roots)
     )
-    return base + roots_block + ERROR_MEMORY.format_prompt_block()
+    return base + roots_block
 
 
 def sanitize_local_paths(text: str) -> str:
@@ -869,7 +870,8 @@ class AgentHandle:
                 build_mcp_servers(config["mcp_servers"], temp_dir, session_id)
             )
             tools = await client.get_tools()
-            agent = create_react_agent(llm, tools)
+            feedback = ToolErrorFeedback(ERROR_MEMORY, db=db)
+            agent = create_react_agent(llm, tools, pre_model_hook=feedback.before_model)
             return agent, llm, client, tools
 
         self.agent, self.llm, self.client, self.tools = self.run(setup())
