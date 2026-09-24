@@ -6,6 +6,8 @@ import asyncio
 from enum import auto
 from tqdm import tqdm
 from pathlib import Path
+from dotenv import load_dotenv
+import httpx
 from copy import deepcopy
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -18,15 +20,15 @@ from langchain.schema import HumanMessage
 # Pprint for debugging
 from pprint import pprint
 
-# Change to current directory
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+os.chdir(PROJECT_ROOT)
 
 # Global variables
 logger = None
 temp_dir_path = None
 
 # Configuration
-model_name = 'qwen3-32b'
+model_name = 'qwen3.5-9b'
 autoplanning = True
 sys_prompt = '''
 You are a geoscientist, and you need to use tools to answer multiple-choice questions about Earth observation data analysis. Note that if a tool returns an error, you can only try again once. Ultimately, you only need to explicitly tell me the correct choice.
@@ -105,24 +107,25 @@ def save_chat_message(chat_log_path, message_data):
         f.write(json.dumps(chat_record, ensure_ascii=False) + '\n')
 
 
-def load_langchain_config(config_path='./agent/config_qwen3.json'):
+def load_langchain_config(config_path=PROJECT_ROOT / 'agent/config_qwen3.json'):
     """Load configuration and initialize LangChain components"""
     with open(config_path, 'r') as f:
         config = json.load(f)
     
     # Initialize OpenAI model with stricter parameters
-    model_config = config['models'][0]
+    load_dotenv(PROJECT_ROOT / '.env')
+    api_key = os.getenv('QWEN35_API_KEY') or os.getenv('QWEN_API_KEY')
+    if not api_key:
+        raise ValueError('QWEN35_API_KEY or QWEN_API_KEY is required for the Qwen3.5 API')
     llm_kwargs = {
-        'model': model_config['model_name'],
-        'api_key': model_config['api_key'],
-        'base_url': model_config['client_args']['base_url'],
+        'model': model_name,
+        'api_key': api_key,
+        'base_url': os.getenv('QWEN_SERVER_URL', 'http://172.31.233.78:8001/v1'),
         'temperature': 0.1,  # Lower temperature for more focused responses
-        'request_timeout': 120  # 2 minute timeout per request
+        'request_timeout': 120,  # 2 minute timeout per request
+        'http_client': httpx.Client(trust_env=False),
+        'http_async_client': httpx.AsyncClient(trust_env=False),
     }
-    
-    # Add generate_args via extra_body if present in config
-    if 'generate_args' in model_config:
-        llm_kwargs['extra_body'] = model_config['generate_args']
     
     llm = ChatOpenAI(**llm_kwargs)
     

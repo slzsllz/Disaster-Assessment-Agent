@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -130,6 +131,7 @@ When answering, follow these rules:
    - Summarize the key detection results clearly.
    - Explain what the detected areas mean in practical disaster-assessment terms.
    - Include important numbers such as area, pixel count, percentage, damage level, confidence, or class distribution when available.
+   - Building-damage class counts are mask pixels, not counts of individual buildings. Never label those values as buildings or 栋.
    - Mention limitations when relevant, such as model uncertainty, image quality, missing bands, cloud cover, lack of ground truth, binary-mask limitations, or index-threshold uncertainty.
 
 4. Answer style.
@@ -780,6 +782,16 @@ def load_model_config(config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     model = cfg["models"][0]
     api_key = substitute_env(model.get("api_key", "") or "")
     base_url = substitute_env((model.get("client_args") or {}).get("base_url", "") or "")
+    qwen35_key = os.getenv("QWEN35_API_KEY")
+    if qwen35_key:
+        return {
+            "path": str(config_path),
+            "model_name": "qwen3.5-9b",
+            "api_key": qwen35_key,
+            "base_url": os.getenv("QWEN_SERVER_URL", "http://172.31.233.78:8001/v1"),
+            "generate_args": {},
+            "mcp_servers": cfg.get("mcpServers", {}),
+        }
     return {
         "path": str(config_path),
         "model_name": model.get("model_name", "qwen3.7-plus"),
@@ -788,6 +800,21 @@ def load_model_config(config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
         "generate_args": model.get("generate_args", {}) or {},
         "mcp_servers": cfg.get("mcpServers", {}),
     }
+
+
+def create_chat_model(config: dict[str, Any], temperature: float, timeout: int):
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=config["model_name"],
+        api_key=config["api_key"] or "EMPTY",
+        base_url=config["base_url"] or None,
+        temperature=temperature,
+        request_timeout=timeout,
+        extra_body=config["generate_args"] or None,
+        http_client=httpx.Client(trust_env=False),
+        http_async_client=httpx.AsyncClient(trust_env=False),
+    )
 
 
 def build_mcp_child_env(session_id: str = "") -> dict[str, str]:
@@ -835,17 +862,9 @@ class AgentHandle:
 
         async def setup() -> tuple[Any, Any, list[Any]]:
             from langchain_mcp_adapters.client import MultiServerMCPClient
-            from langchain_openai import ChatOpenAI
             from langgraph.prebuilt import create_react_agent
 
-            llm = ChatOpenAI(
-                model=config["model_name"],
-                api_key=config["api_key"] or "EMPTY",
-                base_url=config["base_url"] or None,
-                temperature=0.1,
-                request_timeout=180,
-                extra_body=config["generate_args"] or None,
-            )
+            llm = create_chat_model(config, temperature=0.1, timeout=180)
             client = MultiServerMCPClient(
                 build_mcp_servers(config["mcp_servers"], temp_dir, session_id)
             )
@@ -1035,16 +1054,7 @@ def generate_session_title(message: str) -> str | None:
     Returns ``None`` on failure so callers can keep the existing fallback.
     """
     try:
-        from langchain_openai import ChatOpenAI
-
-        llm = ChatOpenAI(
-            model=MODEL_CONFIG["model_name"],
-            api_key=MODEL_CONFIG["api_key"] or "EMPTY",
-            base_url=MODEL_CONFIG["base_url"] or None,
-            temperature=0.1,
-            request_timeout=30,
-            extra_body=MODEL_CONFIG["generate_args"] or None,
-        )
+        llm = create_chat_model(MODEL_CONFIG, temperature=0.1, timeout=30)
         result = llm.invoke([
             SystemMessage(content=(
                 "你是一个标题生成助手。请将用户输入的内容总结为一个简短的中文标题，"
@@ -1124,16 +1134,7 @@ def generate_report_content(
     ``None``.  Returns ``None`` on failure.
     """
     try:
-        from langchain_openai import ChatOpenAI
-
-        llm = ChatOpenAI(
-            model=MODEL_CONFIG["model_name"],
-            api_key=MODEL_CONFIG["api_key"] or "EMPTY",
-            base_url=MODEL_CONFIG["base_url"] or None,
-            temperature=0.4,
-            request_timeout=90,
-            extra_body=MODEL_CONFIG["generate_args"] or None,
-        )
+        llm = create_chat_model(MODEL_CONFIG, temperature=0.4, timeout=90)
 
         image_hint = ""
         if image_names:

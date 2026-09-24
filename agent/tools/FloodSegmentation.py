@@ -29,7 +29,7 @@ Returns:
 
 Answer guidance:
 - Return all generated output paths in the tool result, but do not assume every output is useful to the user.
-- The second-pass multimodal reviewer will inspect the tool outputs and choose which images are useful for frontend display and which files are useful downloads.
+- A downstream reviewer may inspect the tool outputs and choose useful images and files for analysis.
 - The first-pass answer should focus on the flood-inundation result, not on listing or explaining output files.
 - Do not repeat or list output file paths in the final natural-language answer.
 """
@@ -251,13 +251,6 @@ def extract_flood_inundation(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
     result["summary_path"] = str(summary_path)
-
-    # Persist to database
-    try:
-        from tools.utils import save_assessment_to_db
-        save_assessment_to_db("flood", result, raster_path=s1_path)
-    except Exception:
-        pass
 
     return result
 

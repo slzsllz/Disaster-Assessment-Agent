@@ -666,13 +666,6 @@ def geoai_object_detection(
         json.dump(summary, f, indent=2, default=str)
     summary["summary_path"] = str(summary_path)
 
-    # Persist to database
-    try:
-        from tools.utils import save_assessment_to_db
-        save_assessment_to_db(task, summary, raster_path=raster_path)
-    except Exception:
-        pass
-
     return summary
 
 
@@ -787,13 +780,6 @@ def geoai_semantic_segmentation(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, default=str)
     summary["summary_path"] = str(summary_path)
-
-    # Persist to database
-    try:
-        from tools.utils import save_assessment_to_db
-        save_assessment_to_db(model, summary, raster_path=input_path)
-    except Exception:
-        pass
 
     return summary
 

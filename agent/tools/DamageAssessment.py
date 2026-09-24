@@ -28,10 +28,12 @@ Parameters:
 
 Returns:
 - dict: Damage pixel counts, damage ratio, damage level, and saved output paths.
+  All class counts, including building_total, count pixels in the masks, not individual buildings.
+  Never describe these counts as a number of buildings.
 
 Answer guidance:
 - Return all generated output paths in the tool result, but do not assume every output is useful to the user.
-- The second-pass multimodal reviewer will inspect the tool outputs and choose which images are useful for frontend display and which files are useful downloads.
+- A downstream reviewer may inspect the tool outputs and choose useful images and files for analysis.
 - The first-pass answer should focus on the disaster assessment result, not on listing or explaining output files.
 - Do not repeat or list output file paths in the final natural-language answer.
 """
@@ -95,6 +97,7 @@ def _compute_stats(damage_mask) -> Dict[str, float]:
     else:
         damage_level = "severe"
     return {
+        "count_unit": "pixels",
         "building_total": building_total,
         "no_damage": no_damage,
         "minor_damage": minor_damage,
@@ -257,13 +260,6 @@ def assess_building_damage(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
     result["summary_path"] = str(summary_path)
-
-    # Persist to database
-    try:
-        from tools.utils import save_assessment_to_db
-        save_assessment_to_db("damage", result, raster_path=post_image_path)
-    except Exception:
-        pass
 
     return result
 
