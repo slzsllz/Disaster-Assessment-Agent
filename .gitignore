@@ -5,6 +5,7 @@ logs/
 tmp/streamlit_out/
 tmp/fastapi_out/
 tmp/
+data/artifacts/
 
 # Environment variables and secrets
 .env

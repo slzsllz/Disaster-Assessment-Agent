@@ -3,7 +3,7 @@ Disaster-Assessment-Agent 数据库连接层
 
 设计原则:
   1. 懒连接 —— 首次使用时才尝试连库
-  2. 优雅降级 —— DB 不可用时自动回退到纯文件模式，不阻断业务
+  2. 持久化优先 —— 聊天与评估写入失败时显式报告，不伪装为成功
   3. 连接池复用 —— 使用 psycopg 连接池，避免频繁建连
   4. 最小侵入 —— 现有代码只需调用 DB.xxx()，不关心连接细节
 
@@ -15,11 +15,16 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+class DatabaseUnavailable(RuntimeError):
+    pass
 
 # ---------------------------------------------------------------------------
 # psycopg 3 延迟导入
@@ -69,7 +74,7 @@ class Database:
         db.save_session(...)
         db.save_chat_message(...)
 
-    所有方法在 DB 不可用时静默返回 None / [] / False，不抛异常。
+    Agent 的关键读写路径使用严格方法；部分兼容接口仍返回 None / False。
     """
 
     _instance: Optional["Database"] = None
@@ -95,7 +100,9 @@ class Database:
         if self._pool is not None:
             return True
         if self._checked:
-            return False  # 已确认不可用，不重复尝试
+            if time.monotonic() < getattr(self, "_retry_after", 0):
+                return False
+            self._checked = False
         try:
             dsn = _build_dsn()
             # 先用单连接快速探测，避免连接池的长时间重试噪音
@@ -119,6 +126,7 @@ class Database:
             logger.info("Database unavailable, file-only mode: %s", exc)
             self._pool = None
             self._checked = True  # 标记不可用，避免反复重试
+            self._retry_after = time.monotonic() + 5
             return False
 
     @contextmanager
@@ -135,6 +143,33 @@ class Database:
                 yield conn
             finally:
                 conn.close()
+
+    def migrate(self) -> bool:
+        """Apply checked-in migrations once, in order, before serving requests."""
+        if not self._ensure_pool():
+            return False
+        migration_dir = Path(__file__).resolve().parents[1] / "migrations"
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                cur.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()
+                )""")
+                cur.execute("SELECT version FROM schema_migrations")
+                applied = {row[0] for row in cur.fetchall()}
+                for migration in sorted(migration_dir.glob("[0-9]*.sql")):
+                    if migration.name in applied:
+                        continue
+                    cur.execute(migration.read_text(encoding="utf-8"))
+                    cur.execute("INSERT INTO schema_migrations(version) VALUES (%s)", (migration.name,))
+                conn.commit()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Database migration failed: %s", exc)
+            return False
+
+    def require_available(self) -> None:
+        if not self._ensure_pool():
+            raise DatabaseUnavailable("Persistent database is unavailable")
 
     # ==================================================================
     # 1. Sessions
@@ -216,6 +251,7 @@ class Database:
             return False
         try:
             with self._conn() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM assessment_results WHERE session_id = %s", (session_id,))
                 cur.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
                 conn.commit()
                 return cur.rowcount > 0
@@ -252,21 +288,11 @@ class Database:
                 return cur.fetchall()
         except Exception as exc:  # noqa: BLE001
             logger.warning("list_recent_sessions failed: %s", exc)
-            return []
+            raise DatabaseUnavailable("Could not load sessions") from exc
 
     # ==================================================================
     # 2. Chat Messages
     # ==================================================================
-    def _read_file_as_binary(self, file_path: str) -> Optional[bytes]:
-        """读取文件为二进制数据"""
-        try:
-            path = Path(file_path)
-            if path.exists() and path.is_file():
-                return path.read_bytes()
-        except Exception as exc:
-            logger.debug("Failed to read file %s: %s", file_path, exc)
-        return None
-
     def save_chat_message(
         self,
         session_id: str,
@@ -295,18 +321,10 @@ class Database:
             return None
         try:
             with self._conn() as conn, conn.cursor() as cur:
-                # 动态检测可选列 (legend / report_files)
-                cur.execute(
-                    """SELECT column_name FROM information_schema.columns
-                       WHERE table_name = 'chat_messages'
-                       AND column_name IN ('legend', 'report_files')"""
-                )
-                optional_cols = {row[0] for row in cur.fetchall()}
-
                 base_cols = [
                     "session_id", "role", "content", "display_content", "attachments",
                     "images", "tool_trace", "elapsed_seconds", "tool_call_count",
-                    "attachment_files", "image_files",
+                    "attachment_files", "image_files", "legend", "report_files",
                 ]
                 base_vals = [
                     session_id,
@@ -320,14 +338,9 @@ class Database:
                     tool_call_count,
                     Jsonb(attachment_files) if attachment_files else None,
                     Jsonb(image_files) if image_files else None,
+                    Jsonb(legend) if legend else None,
+                    Jsonb(report_files) if report_files else None,
                 ]
-
-                if "legend" in optional_cols:
-                    base_cols.append("legend")
-                    base_vals.append(Jsonb(legend) if legend else None)
-                if "report_files" in optional_cols:
-                    base_cols.append("report_files")
-                    base_vals.append(Jsonb(report_files) if report_files else None)
 
                 cols_sql = sql.SQL(", ").join(sql.Identifier(c) for c in base_cols)
                 placeholders = sql.SQL(", ").join(sql.Placeholder() * len(base_vals))
@@ -352,22 +365,209 @@ class Database:
             logger.warning("save_chat_message failed: %s", exc)
             return None
 
+    def start_turn(
+        self, session_id: str, turn_id: str, content: str,
+        display_content: str, attachments: list[dict],
+    ) -> int:
+        """Record the user message and running turn atomically."""
+        self.require_available()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO agent_turns(id, session_id, status)
+                   VALUES (%s, %s, 'running')""",
+                (turn_id, session_id),
+            )
+            cur.execute(
+                """INSERT INTO chat_messages
+                   (session_id, role, content, display_content, attachments)
+                   VALUES (%s, 'user', %s, %s, %s) RETURNING id""",
+                (session_id, content, display_content, Jsonb(attachments)),
+            )
+            message_id = cur.fetchone()[0]
+            cur.execute(
+                "UPDATE agent_turns SET user_message_id = %s WHERE id = %s",
+                (message_id, turn_id),
+            )
+            cur.execute(
+                """UPDATE sessions SET message_count = message_count + 1,
+                   updated_at = now() WHERE id = %s""",
+                (session_id,),
+            )
+            conn.commit()
+            return message_id
+
+    def complete_turn(
+        self, session_id: str, turn_id: str, content: str,
+        display_content: str, attachments: list[dict], images: list[dict],
+        tool_trace: list[dict], elapsed_seconds: float,
+        legend: list[dict],
+    ) -> int:
+        """Write the answer and mark its turn complete in one transaction."""
+        self.require_available()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO chat_messages
+                   (session_id, role, content, display_content, attachments,
+                    images, tool_trace, elapsed_seconds, tool_call_count, legend)
+                   VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s)
+                   RETURNING id""",
+                (session_id, content, display_content, Jsonb(attachments),
+                 Jsonb(images), Jsonb(tool_trace), elapsed_seconds,
+                 len(tool_trace), Jsonb(legend)),
+            )
+            message_id = cur.fetchone()[0]
+            cur.execute(
+                """UPDATE agent_turns SET status = 'completed',
+                   assistant_message_id = %s, updated_at = now(),
+                   finished_at = now() WHERE id = %s AND status = 'running'""",
+                (message_id, turn_id),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("Turn is missing or already finished")
+            cur.execute(
+                """UPDATE sessions SET message_count = message_count + 1,
+                   updated_at = now() WHERE id = %s""",
+                (session_id,),
+            )
+            conn.commit()
+            return message_id
+
+    def fail_turn(self, session_id: str, turn_id: str, message: str, code: str = "execution_error") -> bool:
+        """Persist a short user-visible failure; never store a traceback here."""
+        if not self._ensure_pool():
+            return False
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE agent_turns SET status = 'failed', error_code = %s,
+                       error_message = %s, updated_at = now(), finished_at = now()
+                       WHERE id = %s AND session_id = %s AND status = 'running'""",
+                    (code, message[:500], turn_id, session_id),
+                )
+                if cur.rowcount != 1:
+                    return False
+                cur.execute("DELETE FROM assessment_results WHERE turn_id = %s", (turn_id,))
+                cur.execute(
+                    """INSERT INTO chat_messages(session_id, role, content, display_content)
+                       VALUES (%s, 'assistant', %s, %s)""",
+                    (session_id, message, message),
+                )
+                cur.execute(
+                    """UPDATE sessions SET message_count = message_count + 1,
+                       updated_at = now() WHERE id = %s""",
+                    (session_id,),
+                )
+                conn.commit()
+                return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fail_turn failed: %s", exc)
+            return False
+
+    def save_artifact(self, record: dict) -> None:
+        self.require_available()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO artifacts
+                   (id, session_id, kind, original_name, mime_type, size_bytes,
+                    sha256, relative_path)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (record["id"], record["session_id"], record["kind"],
+                 record["original_name"], record["mime_type"],
+                 record["size_bytes"], record["sha256"], record["relative_path"]),
+            )
+            conn.commit()
+
+    def get_artifact(self, artifact_id: str) -> Optional[dict]:
+        self.require_available()
+        try:
+            with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT * FROM artifacts WHERE id = %s", (artifact_id,))
+                return cur.fetchone()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_artifact failed: %s", exc)
+            raise DatabaseUnavailable("Could not load artifact") from exc
+
+    def update_message_artifact_refs(
+        self, message_id: int, attachments: list[dict],
+        images: list[dict], reports: list[dict],
+    ) -> None:
+        """Replace legacy inline file data after copies have been verified."""
+        self.require_available()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """UPDATE chat_messages SET attachments = %s, images = %s,
+                   report_files = %s, attachment_files = NULL, image_files = NULL
+                   WHERE id = %s""",
+                (Jsonb(attachments), Jsonb(images), Jsonb(reports), message_id),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("Legacy message disappeared during migration")
+            conn.commit()
+
+    def clear_session_data(self, session_id: str) -> None:
+        self.require_available()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM assessment_results WHERE session_id = %s", (session_id,))
+            cur.execute("DELETE FROM agent_turns WHERE session_id = %s", (session_id,))
+            cur.execute("DELETE FROM chat_messages WHERE session_id = %s", (session_id,))
+            cur.execute("DELETE FROM artifacts WHERE session_id = %s", (session_id,))
+            cur.execute(
+                "UPDATE sessions SET message_count = 0, updated_at = now() WHERE id = %s",
+                (session_id,),
+            )
+            conn.commit()
+
+    def list_turns(self, session_id: str) -> List[dict]:
+        self.require_available()
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT id, session_id, status, user_message_id,
+                   assistant_message_id, error_code, error_message,
+                   started_at, updated_at, finished_at
+                   FROM agent_turns WHERE session_id = %s
+                   ORDER BY started_at ASC, id ASC""",
+                (session_id,),
+            )
+            return cur.fetchall()
+
+    def reconcile_stale_turns(self) -> int:
+        """Close turns abandoned by a process that stopped over an hour ago."""
+        self.require_available()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, session_id FROM agent_turns
+                   WHERE status = 'running' AND started_at < now() - interval '1 hour'
+                   FOR UPDATE SKIP LOCKED"""
+            )
+            rows = cur.fetchall()
+            for turn_id, session_id in rows:
+                message = "任务中断，结果未完成。"
+                cur.execute(
+                    """UPDATE agent_turns SET status = 'failed',
+                       error_code = 'interrupted', error_message = %s,
+                       updated_at = now(), finished_at = now() WHERE id = %s""",
+                    (message, turn_id),
+                )
+                cur.execute("DELETE FROM assessment_results WHERE turn_id = %s", (turn_id,))
+                cur.execute(
+                    """INSERT INTO chat_messages(session_id, role, content, display_content)
+                       VALUES (%s, 'assistant', %s, %s)""",
+                    (session_id, message, message),
+                )
+                cur.execute(
+                    """UPDATE sessions SET message_count = message_count + 1,
+                       updated_at = now() WHERE id = %s""",
+                    (session_id,),
+                )
+            conn.commit()
+            return len(rows)
+
     def update_message_report_files(self, message_id: int, report_files: list) -> bool:
         """更新某条消息的 report_files 字段（用于流式响应后异步生成 PDF 报告）"""
         if not self._ensure_pool():
             return False
         try:
             with self._conn() as conn, conn.cursor() as cur:
-                # 确保 report_files 列存在
-                cur.execute(
-                    """SELECT column_name FROM information_schema.columns
-                       WHERE table_name = 'chat_messages' AND column_name = 'report_files'"""
-                )
-                if cur.fetchone() is None:
-                    cur.execute(
-                        "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS report_files JSONB"
-                    )
-                    conn.commit()
                 cur.execute(
                     "UPDATE chat_messages SET report_files = %s WHERE id = %s",
                     (Jsonb(report_files) if report_files else None, message_id),
@@ -387,13 +587,24 @@ class Database:
                 cur.execute(
                     """SELECT * FROM chat_messages
                        WHERE session_id = %s
-                       ORDER BY created_at ASC""",
+                       ORDER BY created_at ASC, id ASC""",
                     (session_id,),
                 )
                 return cur.fetchall()
         except Exception as exc:  # noqa: BLE001
             logger.warning("get_chat_messages failed: %s", exc)
             return []
+
+    def load_chat_messages_strict(self, session_id: str) -> List[dict]:
+        """History used by the agent must fail visibly if it cannot be loaded."""
+        self.require_available()
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT * FROM chat_messages WHERE session_id = %s
+                   ORDER BY created_at ASC, id ASC""",
+                (session_id,),
+            )
+            return cur.fetchall()
 
     def delete_session_messages(self, session_id: str) -> bool:
         """清空会话消息并重置计数"""
@@ -427,11 +638,13 @@ class Database:
         session_id: str = None,
         description: str = "",
         geom_geojson: str = None,
+        turn_id: str | None = None,
+        artifact_ids: list[str] | None = None,
     ) -> Optional[int]:
-        """保存工具评估结果
+        """保存工具评估结果及持久化产物引用
 
         Args:
-            task: 任务类型 (building/flood/car/ship/damage/solar_panel/wetland/water)
+            task: MCP 工具名
             summary: 工具输出的 summary dict
             session_id: 关联的会话 ID
             description: 描述
@@ -440,20 +653,14 @@ class Database:
         if not self._ensure_pool():
             return None
         try:
-            # 读取文件二进制数据
-            raster_file = self._read_file_as_binary(summary.get("raster_path", ""))
-            geojson_file = self._read_file_as_binary(summary.get("geojson_path", ""))
-            overlay_file = self._read_file_as_binary(summary.get("overlay_path", ""))
-            summary_file = self._read_file_as_binary(summary.get("summary_path", ""))
-
             with self._conn() as conn, conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO assessment_results
                        (session_id, task, description, raster_path, geojson_path,
                         overlay_path, summary_path, summary, geom, model_file,
-                        num_objects, raster_file, geojson_file, overlay_file, summary_file)
+                        num_objects, turn_id, artifact_ids)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, %s,
-                               %s, %s, %s, %s)
+                               %s, %s)
                        RETURNING id""",
                     (
                         session_id,
@@ -466,10 +673,8 @@ class Database:
                         Jsonb(summary),
                         summary.get("model_file"),
                         summary.get("num_objects"),
-                        raster_file,
-                        geojson_file,
-                        overlay_file,
-                        summary_file,
+                        turn_id,
+                        Jsonb(artifact_ids or []),
                     ),
                 )
                 row = cur.fetchone()
@@ -513,7 +718,8 @@ class Database:
             with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     f"""SELECT id, session_id, task, description, raster_path,
-                              geojson_path, overlay_path, summary, num_objects,
+                              geojson_path, overlay_path, summary_path, summary,
+                              num_objects, artifact_ids,
                               created_at, ST_AsGeoJSON(geom) as geom_geojson
                         FROM assessment_results{where}
                         ORDER BY created_at DESC LIMIT %s""",
@@ -522,7 +728,22 @@ class Database:
                 return cur.fetchall()
         except Exception as exc:  # noqa: BLE001
             logger.warning("query_assessments failed: %s", exc)
-            return []
+            raise DatabaseUnavailable("Could not load assessments") from exc
+
+    def latest_assessment_geometry(self, session_id: str) -> Optional[dict]:
+        self.require_available()
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT id, session_id, task, description, raster_path,
+                   geojson_path, overlay_path, summary_path, summary,
+                   num_objects, artifact_ids, created_at,
+                   ST_AsGeoJSON(geom) AS geom_geojson
+                   FROM assessment_results
+                   WHERE session_id = %s AND geom IS NOT NULL
+                   ORDER BY created_at DESC, id DESC LIMIT 1""",
+                (session_id,),
+            )
+            return cur.fetchone()
 
     def query_assessments_within(
         self, geom_geojson: str, task: str = None, limit: int = 50
@@ -542,7 +763,7 @@ class Database:
                               created_at, ST_AsGeoJSON(geom) as geom_geojson
                         FROM assessment_results
                         WHERE geom IS NOT NULL
-                          AND ST_Intersects(geom, ST_GeomFromGeoJSON(%s))
+                          AND ST_Intersects(geom, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326))
                           {task_clause}
                         ORDER BY created_at DESC LIMIT %s""",
                     params,
@@ -615,20 +836,6 @@ class Database:
             return False
         try:
             with self._conn() as conn, conn.cursor() as cur:
-                cur.execute(
-                    """CREATE TABLE IF NOT EXISTS error_recovery_candidates (
-                           id BIGSERIAL PRIMARY KEY,
-                           tool_name TEXT NOT NULL,
-                           error_signature TEXT NOT NULL,
-                           error_hash TEXT NOT NULL,
-                           changed_fields JSONB NOT NULL,
-                           occurrences INTEGER NOT NULL DEFAULT 1,
-                           status TEXT NOT NULL DEFAULT 'pending',
-                           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                           UNIQUE (tool_name, error_hash, changed_fields)
-                       )"""
-                )
                 cur.execute(
                     """INSERT INTO error_recovery_candidates
                            (tool_name, error_signature, error_hash, changed_fields)

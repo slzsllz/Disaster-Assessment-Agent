@@ -18,6 +18,7 @@ import mimetypes
 import os
 import queue
 import re
+import shutil
 import sys
 import threading
 import time
@@ -31,14 +32,15 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent.error_memory import ErrorMemory
 from agent.error_feedback import ToolErrorFeedback
+from agent.artifacts import ArtifactStore, artifact_payload
 from agent.tool_router import ToolRouter
 from agent.tool_policy import CURATED_TOOLS_BY_SERVER, CURATED_TOOL_NAMES, select_curated_tools
-from agent.db import db
+from agent.db import DatabaseUnavailable, db
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +99,7 @@ AGENT_DIR = PROJECT_ROOT / "agent"
 BENCHMARK_DATA_DIR = PROJECT_ROOT / "benchmark" / "data"
 TEMP_BASE = PROJECT_ROOT / "tmp" / "fastapi_out"
 TEMP_BASE.mkdir(parents=True, exist_ok=True)
+ARTIFACT_STORE = ArtifactStore(PROJECT_ROOT / "data" / "artifacts", db)
 ERROR_MEMORY = ErrorMemory(AGENT_DIR / "error_memory.json", db=db)
 
 DEFAULT_CONFIG = AGENT_DIR / next(
@@ -986,12 +989,16 @@ class AgentHandle:
             finally:
                 output_queue.put(sentinel)
 
-        asyncio.run_coroutine_threadsafe(run_agent(), self.loop)
-        while True:
-            item = output_queue.get()
-            if item is sentinel:
-                break
-            yield item
+        future = asyncio.run_coroutine_threadsafe(run_agent(), self.loop)
+        try:
+            while True:
+                item = output_queue.get()
+                if item is sentinel:
+                    break
+                yield item
+        finally:
+            if not future.done():
+                future.cancel()
 
     def close(self) -> None:
         async def close_client():
@@ -1024,6 +1031,20 @@ class ChatSession:
 
 
 app = FastAPI(title="Disaster Detection Agent API")
+
+
+@app.exception_handler(DatabaseUnavailable)
+async def database_unavailable_handler(request, exc):
+    return JSONResponse(status_code=503, content={"detail": "数据库暂不可用，请稍后重试。"})
+
+
+@app.on_event("startup")
+def apply_database_migrations() -> None:
+    if not db.migrate():
+        raise RuntimeError("Database migrations could not be applied")
+    db.reconcile_stale_turns()
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -1039,7 +1060,11 @@ SESSIONS_LOCK = threading.Lock()
 
 
 def get_session(session_id: str) -> ChatSession:
-    session_id = session_id.strip() or uuid.uuid4().hex
+    try:
+        session_id = str(uuid.UUID(session_id.strip()))
+    except (AttributeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid session ID") from None
+    db.require_available()
     with SESSIONS_LOCK:
         session = SESSIONS.get(session_id)
         if session is None:
@@ -1047,6 +1072,36 @@ def get_session(session_id: str) -> ChatSession:
             temp_dir.mkdir(parents=True, exist_ok=True)
             (temp_dir / "out").mkdir(parents=True, exist_ok=True)
             session = ChatSession(session_id=session_id, temp_dir=temp_dir)
+            for row in db.load_chat_messages_strict(session_id):
+                if row["role"] == "user":
+                    restored_paths: list[str] = []
+                    for attachment in row.get("attachments") or []:
+                        artifact_id = attachment.get("artifact_id") if isinstance(attachment, dict) else None
+                        record = db.get_artifact(artifact_id) if artifact_id else None
+                        if record:
+                            try:
+                                restored_paths.append(str(ARTIFACT_STORE.resolve(record)))
+                            except FileNotFoundError:
+                                pass
+                        elif isinstance(attachment, dict) and attachment.get("path"):
+                            path = Path(attachment["path"])
+                            if path.is_file():
+                                restored_paths.append(str(path))
+                    if restored_paths:
+                        content = build_user_message_content(
+                            row.get("display_content") or "Please analyze the uploaded file(s).",
+                            restored_paths,
+                        )
+                    elif row.get("attachments"):
+                        content = (
+                            (row.get("display_content") or "先前上传的文件") +
+                            "\n[历史附件已不可用；需要再次使用时请用户重新上传。]"
+                        )
+                    else:
+                        content = row.get("content") or ""
+                    session.messages.append({"role": "user", "content": content})
+                elif row["role"] == "assistant":
+                    session.messages.append({"role": "assistant", "content": row.get("content") or ""})
             SESSIONS[session_id] = session
         return session
 
@@ -1056,6 +1111,115 @@ def file_payload(path: str) -> dict[str, str]:
     file_path = Path(path)
     FILES[file_id] = file_path
     return {"name": file_path.name, "url": f"/api/files/{file_id}"}
+
+
+def start_chat_turn(
+    session: ChatSession, message: str, system_prompt: str,
+    uploads: list[UploadFile] | None,
+) -> tuple[str, list[str], list[dict], str]:
+    """Save the user turn and make uploaded paths durable before inference."""
+    session_id = session.session_id
+    if not db.create_session(
+        session_id=session_id,
+        model_name=MODEL_CONFIG["model_name"],
+        config_path=MODEL_CONFIG["path"],
+        system_prompt=system_prompt,
+        title=(message.strip()[:80] or None),
+    ):
+        raise RuntimeError("Unable to save chat session")
+    session.uploads_dir.mkdir(parents=True, exist_ok=True)
+    uploaded_paths: list[str] = []
+    attachments: list[dict] = []
+    for upload in uploads or []:
+        if not upload.filename:
+            continue
+        safe_name = Path(upload.filename.replace("\\", "/")).name
+        temporary = session.uploads_dir / f"{uuid.uuid4().hex}_{safe_name}"
+        try:
+            with temporary.open("wb") as output:
+                shutil.copyfileobj(upload.file, output)
+            record = ARTIFACT_STORE.put_file(temporary, session_id, "upload", safe_name)
+        finally:
+            temporary.unlink(missing_ok=True)
+        uploaded_paths.append(str(ARTIFACT_STORE.resolve(record)))
+        attachments.append({"name": safe_name, "artifact_id": record["id"]})
+
+    content_parts = [message.strip()] if message.strip() else []
+    if uploaded_paths:
+        content_parts.append(
+            "Uploaded files:\n" + "\n".join(f"- `{path}`" for path in uploaded_paths)
+        )
+    user_content = "\n\n".join(content_parts) or "Please analyze the uploaded file(s)."
+    turn_id = str(uuid.uuid4())
+    db.start_turn(session_id, turn_id, user_content, message.strip(), attachments)
+    session.messages.append({
+        "role": "user",
+        "content": build_user_message_content(user_content, uploaded_paths),
+    })
+    threading.Thread(
+        target=maybe_generate_session_title, args=(session_id, message), daemon=True,
+    ).start()
+    return turn_id, uploaded_paths, attachments, user_content
+
+
+def persist_output_artifacts(
+    session: ChatSession, output_paths: list[str],
+) -> tuple[list[str], dict[str, dict]]:
+    """Copy only this session's tool outputs into durable artifact storage."""
+    root = session.output_dir.resolve()
+    records: dict[str, dict] = {}
+    for path in output_paths:
+        resolved = Path(path).resolve()
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            continue
+        records[path] = ARTIFACT_STORE.put_file(resolved, session.session_id, "tool_output")
+    return list(records), records
+
+
+def save_tool_assessments(
+    response: dict, session_id: str, turn_id: str, records: dict[str, dict],
+) -> None:
+    """Persist each successful curated tool result and its linked artifacts."""
+    from agent.error_feedback import tool_error
+
+    def decode(value: Any) -> dict | None:
+        if isinstance(value, dict):
+            if value.get("type") == "text" and isinstance(value.get("text"), str):
+                return decode(value["text"])
+            return value
+        if isinstance(value, list):
+            for item in value:
+                decoded = decode(item)
+                if decoded:
+                    return decoded
+            return None
+        if isinstance(value, str):
+            try:
+                return decode(json.loads(value))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    call_names = {
+        call.get("id"): call.get("name")
+        for message in response.get("messages", []) if isinstance(message, AIMessage)
+        for call in message.tool_calls if call.get("id")
+    }
+    for result in response.get("messages", []):
+        if not isinstance(result, ToolMessage) or tool_error(result):
+            continue
+        name = result.name or call_names.get(result.tool_call_id) or "tool"
+        summary = decode(result.content)
+        if summary is None:
+            summary = {"result_excerpt": str(result.content)[:2000]}
+        tool_paths = extract_tool_output_files({"messages": [result]})
+        artifact_ids = [records[path]["id"] for path in tool_paths if path in records]
+        geometry = extract_first_output_geometry([path for path in tool_paths if path in records])
+        if db.save_assessment(
+            task=name, summary=summary, session_id=session_id,
+            geom_geojson=geometry, turn_id=turn_id, artifact_ids=artifact_ids,
+        ) is None:
+            raise RuntimeError(f"Unable to persist assessment for {name}")
 
 
 def sse_event(event: str, data: dict[str, Any]) -> str:
@@ -1610,26 +1774,29 @@ def generate_and_store_pdf_report(
     if not pdf_bytes:
         return None
 
-    file_id = uuid.uuid4().hex
     safe_title = re.sub(r'[\\/:*?"<>|]', "_", title)[:40]
     file_name = f"{safe_title}.pdf"
-    temp_path = TEMP_BASE / f"{file_id}_{file_name}"
+    temp_path = TEMP_BASE / f"{uuid.uuid4().hex}_{file_name}"
     temp_path.write_bytes(pdf_bytes)
-    FILES[file_id] = temp_path
+    try:
+        record = ARTIFACT_STORE.put_file(temp_path, session_id, "report", file_name)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
     report_description = summary or "基于本次对话生成的评估报告"
     report_file_data = {
         "name": file_name,
         "mime_type": "application/pdf",
-        "data_base64": base64.b64encode(pdf_bytes).decode("utf-8"),
+        "artifact_id": record["id"],
         "description": report_description,
     }
 
     if message_id is not None:
-        db.update_message_report_files(message_id, [report_file_data])
+        if not db.update_message_report_files(message_id, [report_file_data]):
+            raise RuntimeError("Unable to persist report reference")
 
     return {
-        "url": f"/api/files/{file_id}",
+        "url": f"/api/files/{record['id']}",
         "name": file_name,
         "description": report_description,
     }
@@ -1639,19 +1806,6 @@ def generate_and_store_pdf_report(
 # DB row serializers -- convert dict_row results to JSON-friendly dicts.
 # FastAPI handles datetime/UUID encoding; we only reshape images/assessments.
 # ---------------------------------------------------------------------------
-def _image_descriptor(path: str) -> dict[str, str]:
-    """Image descriptor stored in chat_messages.images JSONB.
-
-    Keeps the absolute path so a history row loaded after a backend restart can
-    re-register the file (the /api/files/{id} mapping lives in-memory only).
-    """
-    return {"name": Path(path).name, "path": str(path)}
-
-
-def _file_descriptor(path: str) -> dict[str, str]:
-    return {"name": Path(path).name, "path": str(path)}
-
-
 def _serialize_message(row: dict) -> dict[str, Any]:
     import base64
 
@@ -1679,6 +1833,11 @@ def _serialize_message(row: dict) -> dict[str, Any]:
     if not images:
         for img in row.get("images") or []:
             if not isinstance(img, dict):
+                continue
+            if img.get("artifact_id"):
+                record = db.get_artifact(img["artifact_id"])
+                if record:
+                    images.append(artifact_payload(record))
                 continue
             path = img.get("path")
             if path and Path(path).exists():
@@ -1712,6 +1871,11 @@ def _serialize_message(row: dict) -> dict[str, Any]:
         for item in row.get("attachments") or []:
             if not isinstance(item, dict):
                 continue
+            if item.get("artifact_id"):
+                record = db.get_artifact(item["artifact_id"])
+                if record:
+                    attachments.append(artifact_payload(record))
+                continue
             path = item.get("path")
             if path and Path(path).exists():
                 attachments.append(file_payload(path))
@@ -1727,6 +1891,15 @@ def _serialize_message(row: dict) -> dict[str, Any]:
         if not isinstance(rf, dict):
             continue
         name = rf.get("name", "report.pdf")
+        if rf.get("artifact_id"):
+            record = db.get_artifact(rf["artifact_id"])
+            if record:
+                report = {
+                    "url": f"/api/files/{record['id']}",
+                    "name": name,
+                    "description": rf.get("description") or "基于本次对话生成的评估报告",
+                }
+                break
         data_b64 = rf.get("data_base64")
         if data_b64:
             file_id = uuid.uuid4().hex
@@ -1784,6 +1957,17 @@ def _serialize_session(row: dict) -> dict[str, Any]:
 
 def _serialize_assessment(row: dict) -> dict[str, Any]:
     overlay_path = row.get("overlay_path")
+    overlay_url = None
+    artifact_items: list[dict[str, str]] = []
+    for artifact_id in row.get("artifact_ids") or []:
+        record = db.get_artifact(artifact_id)
+        if record:
+            artifact_items.append(artifact_payload(record))
+        if record and overlay_path and record["original_name"] == Path(overlay_path).name:
+            overlay_url = artifact_payload(record)["url"]
+            break
+    if overlay_url is None and overlay_path and Path(overlay_path).exists():
+        overlay_url = file_payload(overlay_path)["url"]
     return {
         "id": row["id"],
         "session_id": str(row["session_id"]) if row.get("session_id") else None,
@@ -1794,27 +1978,30 @@ def _serialize_assessment(row: dict) -> dict[str, Any]:
         "overlay_path": overlay_path,
         "summary_path": row.get("summary_path"),
         "summary": row.get("summary") or {},
+        "artifacts": artifact_items,
         "num_objects": row.get("num_objects"),
         "geom": row.get("geom_geojson"),
         "created_at": row.get("created_at"),
-        "overlay_url": file_payload(overlay_path)["url"] if overlay_path and Path(overlay_path).exists() else None,
+        "overlay_url": overlay_url,
     }
 
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    db_ok = db.health_check()
     return {
-        "ok": True,
+        "ok": db_ok,
         "model": MODEL_CONFIG["model_name"],
         "tools": list(MODEL_CONFIG["mcp_servers"].keys()),
         "enabled_tool_count": len(CURATED_TOOL_NAMES),
-        "db_ok": db.health_check(),
+        "db_ok": db_ok,
     }
 
 
 @app.get("/api/sessions")
 def list_sessions(limit: int = 30) -> dict[str, Any]:
     """列出最近的会话 -- 前端历史侧栏的数据来源 (DB)"""
+    db.require_available()
     rows = db.list_recent_sessions(limit=limit)
     return {"sessions": [_serialize_session(r) for r in rows]}
 
@@ -1822,13 +2009,21 @@ def list_sessions(limit: int = 30) -> dict[str, Any]:
 @app.get("/api/sessions/{session_id}/messages")
 def get_session_messages(session_id: str) -> dict[str, Any]:
     """加载某会话的全部消息 -- 切换历史会话时从 DB 读取"""
-    rows = db.get_chat_messages(session_id)
+    db.require_available()
+    rows = db.load_chat_messages_strict(session_id)
     return {"session_id": session_id, "messages": [_serialize_message(r) for r in rows]}
+
+
+@app.get("/api/sessions/{session_id}/turns")
+def get_session_turns(session_id: str) -> dict[str, Any]:
+    """Show persisted execution status for each agent turn."""
+    return {"session_id": session_id, "turns": db.list_turns(session_id)}
 
 
 @app.get("/api/sessions/{session_id}/assessments")
 def get_session_assessments(session_id: str) -> dict[str, Any]:
     """某会话产生的评估结果 (模型输出)"""
+    db.require_available()
     rows = db.query_assessments(session_id=session_id)
     return {"session_id": session_id, "assessments": [_serialize_assessment(r) for r in rows]}
 
@@ -1836,22 +2031,22 @@ def get_session_assessments(session_id: str) -> dict[str, Any]:
 @app.get("/api/sessions/{session_id}/latest-geometry")
 def get_session_latest_geometry(session_id: str) -> dict[str, Any]:
     """返回某会话最新的空间范围, 用于前端地图自动定位。"""
-    rows = db.query_assessments(session_id=session_id, limit=20)
-    for row in rows:
-        if row.get("geom_geojson"):
-            assessment = _serialize_assessment(row)
-            return {
-                "session_id": session_id,
-                "found": True,
-                "assessment": assessment,
-                "geom": assessment["geom"],
-            }
+    row = db.latest_assessment_geometry(session_id)
+    if row:
+        assessment = _serialize_assessment(row)
+        return {
+            "session_id": session_id,
+            "found": True,
+            "assessment": assessment,
+            "geom": assessment["geom"],
+        }
     return {"session_id": session_id, "found": False, "assessment": None, "geom": None}
 
 
 @app.get("/api/assessments")
 def list_assessments(task: str = "", limit: int = 50) -> dict[str, Any]:
     """全局评估结果列表 (可按 task 过滤)"""
+    db.require_available()
     rows = db.query_assessments(task=task or None, limit=limit)
     return {"assessments": [_serialize_assessment(r) for r in rows]}
 
@@ -1860,23 +2055,65 @@ def list_assessments(task: str = "", limit: int = 50) -> dict[str, Any]:
 def clear_session(session_id: str) -> dict[str, bool]:
     session = get_session(session_id)
     with session.lock:
+        db.clear_session_data(session.session_id)
         session.messages.clear()
-    db.delete_session_messages(session_id)
+        if session.handle:
+            session.handle.close()
+            session.handle = None
+        ARTIFACT_STORE.delete_session_files(session.session_id)
+        shutil.rmtree(session.temp_dir, ignore_errors=True)
+        session.output_dir.mkdir(parents=True, exist_ok=True)
     return {"ok": True}
 
 
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str) -> dict[str, bool]:
     """删除整个会话及其所有消息"""
-    success = db.delete_session(session_id)
-    # 清理内存中的会话缓存
+    try:
+        session_id = str(uuid.UUID(session_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session ID") from None
+    db.require_available()
     with SESSIONS_LOCK:
-        SESSIONS.pop(session_id, None)
+        session = SESSIONS.get(session_id)
+    if session:
+        session.lock.acquire()
+    try:
+        success = db.delete_session(session_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Session not found")
+        ARTIFACT_STORE.delete_session_files(session_id)
+        shutil.rmtree(TEMP_BASE / session_id, ignore_errors=True)
+        if session and session.handle:
+            session.handle.close()
+        with SESSIONS_LOCK:
+            SESSIONS.pop(session_id, None)
+    finally:
+        if session:
+            session.lock.release()
     return {"ok": success}
 
 
 @app.get("/api/files/{file_id}")
 def get_file(file_id: str) -> FileResponse:
+    try:
+        artifact_id = str(uuid.UUID(file_id))
+    except ValueError:
+        artifact_id = ""
+    if artifact_id:
+        record = db.get_artifact(artifact_id)
+        if record:
+            try:
+                return FileResponse(
+                    ARTIFACT_STORE.resolve(record), media_type=record["mime_type"],
+                    filename=record["original_name"],
+                    content_disposition_type=(
+                        "inline" if record["mime_type"].startswith("image/")
+                        or record["mime_type"] == "application/pdf" else "attachment"
+                    ),
+                )
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail="Artifact content missing") from None
     path = FILES.get(file_id)
     if path is None or not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -1894,65 +2131,15 @@ def chat(
     files: list[UploadFile] | None = File(default=None),
 ) -> dict[str, Any]:
     session = get_session(session_id)
+    turn_id: str | None = None
     with session.lock:
         try:
-            session.uploads_dir.mkdir(parents=True, exist_ok=True)
-            uploaded_paths: list[str] = []
-            attachment_files: list[dict] = []
-            for upload in files or []:
-                if not upload.filename:
-                    continue
-                safe_name = Path(upload.filename).name
-                save_path = session.uploads_dir / safe_name
-                file_data = upload.file.read()
-                with open(save_path, "wb") as out:
-                    out.write(file_data)
-                uploaded_paths.append(str(save_path))
-
-                # 读取文件二进制数据用于数据库存储
-                import base64
-                attachment_files.append({
-                    "name": safe_name,
-                    "mime_type": upload.content_type or "application/octet-stream",
-                    "data_base64": base64.b64encode(file_data).decode("utf-8"),
-                })
-
-            content_parts = [message.strip()] if message.strip() else []
-            if uploaded_paths:
-                content_parts.append(
-                    "Uploaded files:\n" + "\n".join(f"- `{path}`" for path in uploaded_paths)
-                )
-            user_content = "\n\n".join(content_parts) or "Please analyze the uploaded file(s)."
-            session.messages.append({
-                "role": "user",
-                "content": build_user_message_content(user_content, uploaded_paths),
-            })
-
-            # Persist session + user message to DB (upsert; idempotent)
-            db.create_session(
-                session_id=session_id,
-                model_name=MODEL_CONFIG["model_name"],
-                config_path=MODEL_CONFIG["path"],
-                system_prompt=system_prompt,
-                title=(message.strip()[:80] or None),
-            )
-            # AI 总结长输入为会话标题 (后台执行，不阻塞主流程)
-            threading.Thread(
-                target=maybe_generate_session_title,
-                args=(session_id, message),
-                daemon=True,
-            ).start()
-            db.save_chat_message(
-                session_id,
-                "user",
-                content=user_content,
-                display_content=message.strip(),
-                attachments=[{"name": Path(p).name, "path": p} for p in uploaded_paths],
-                attachment_files=attachment_files,
+            turn_id, uploaded_paths, _, _ = start_chat_turn(
+                session, message, system_prompt, files
             )
 
             if session.handle is None:
-                session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir, session_id=session_id)
+                session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir, session_id=session.session_id)
 
             data_roots = [str(BENCHMARK_DATA_DIR), str(session.uploads_dir), str(session.output_dir)]
             effective_prompt = build_system_prompt(system_prompt, data_roots)
@@ -1969,7 +2156,9 @@ def chat(
             elapsed = time.time() - started
             raw_answer = last_ai_message(response)
             trace = tool_trace(response)
-            output_paths = extract_tool_output_files(response)
+            output_paths, artifact_records = persist_output_artifacts(
+                session, extract_tool_output_files(response)
+            )
             reviewed_answer = session.handle.review_answer_and_artifacts(
                 raw_answer,
                 uploaded_paths,
@@ -1986,59 +2175,43 @@ def chat(
             geometry = extract_first_output_geometry(output_paths)
             legend = extract_tool_legend(response) if images else []
 
+            save_tool_assessments(response, session.session_id, turn_id, artifact_records)
+            _msg_id = db.complete_turn(
+                session.session_id, turn_id,
+                final_answer or reviewed_answer or raw_answer, display_answer,
+                [{"name": artifact_records[p]["original_name"],
+                  "artifact_id": artifact_records[p]["id"]} for p in output_files],
+                [{"name": artifact_records[p]["original_name"],
+                  "artifact_id": artifact_records[p]["id"]} for p in images],
+                trace, elapsed, legend,
+            )
             session.messages.append(
                 {"role": "assistant", "content": final_answer or reviewed_answer or raw_answer}
-            )
-            # 读取输出图片的二进制数据
-            image_files: list[dict] = []
-            for img_path in images:
-                try:
-                    img_data = Path(img_path).read_bytes()
-                    import base64
-                    image_files.append({
-                        "name": Path(img_path).name,
-                        "mime_type": "image/png",
-                        "data_base64": base64.b64encode(img_data).decode("utf-8"),
-                    })
-                except Exception:
-                    pass
-
-            _msg_id = db.save_chat_message(
-                session_id,
-                "assistant",
-                content=final_answer or reviewed_answer or raw_answer,
-                display_content=display_answer,
-                attachments=[_file_descriptor(p) for p in output_files],
-                images=[_image_descriptor(p) for p in images],
-                tool_trace=trace,
-                elapsed_seconds=elapsed,
-                tool_call_count=len(trace),
-                image_files=image_files,
-                legend=legend,
             )
 
             # 生成 PDF 报告（仅在用户明确要求时生成）
             report = None
             if should_generate_report(message):
-                report_images = [
-                    {"name": Path(p).name, "data": Path(p).read_bytes()}
-                    for p in images
-                    if Path(p).exists()
-                ]
-                report = generate_and_store_pdf_report(
-                    display_answer or final_answer or raw_answer,
-                    message,
-                    session_id,
-                    message_id=_msg_id,
-                    images=report_images,
-                )
+                try:
+                    report_images = [
+                        {"name": Path(p).name, "data": Path(p).read_bytes()}
+                        for p in images if Path(p).exists()
+                    ]
+                    report = generate_and_store_pdf_report(
+                        display_answer or final_answer or raw_answer,
+                        message, session.session_id, message_id=_msg_id,
+                        images=report_images,
+                    )
+                except Exception:
+                    report = None
 
             return {
+                "turn_id": turn_id,
                 "answer": display_answer or "(empty response)",
                 "elapsed": elapsed,
                 "tool_calls": len(trace),
-                "images": [file_payload(path) for path in images],
-                "files": [file_payload(path) for path in output_files],
+                "images": [artifact_payload(artifact_records[p]) for p in images],
+                "files": [artifact_payload(artifact_records[p]) for p in output_files],
                 "geometry": geometry,
                 "legend": legend,
                 "trace": trace if show_trace else [],
@@ -2047,8 +2220,12 @@ def chat(
         except Exception as exc:  # noqa: BLE001
             error_text = "".join(traceback.format_exception(exc))
             matches = ERROR_MEMORY.lookup_all(error_text)
+            public_error = "任务执行或结果保存失败，请重试。"
+            if turn_id and db.fail_turn(session.session_id, turn_id, public_error):
+                session.messages.append({"role": "assistant", "content": public_error})
             return {
-                "answer": f"后端调用失败：{exc}",
+                "turn_id": turn_id,
+                "answer": public_error,
                 "elapsed": 0,
                 "tool_calls": 0,
                 "images": [],
@@ -2056,7 +2233,7 @@ def chat(
                 "geometry": None,
                 "legend": [],
                 "trace": [],
-                "error": error_text,
+                "error": public_error,
                 "memory_suggestions": [
                     {"pattern": pattern, "fix": fix} for pattern, fix in matches
                 ],
@@ -2075,69 +2252,21 @@ def chat_stream(
 ) -> StreamingResponse:
     session = get_session(session_id)
     session.lock.acquire()
+    turn_id: str | None = None
     try:
-        session.uploads_dir.mkdir(parents=True, exist_ok=True)
-        uploaded_paths: list[str] = []
-        attachment_files: list[dict] = []
-        for upload in files or []:
-            if not upload.filename:
-                continue
-            safe_name = Path(upload.filename).name
-            save_path = session.uploads_dir / safe_name
-            file_data = upload.file.read()
-            with open(save_path, "wb") as out:
-                out.write(file_data)
-            uploaded_paths.append(str(save_path))
-
-            # 读取文件二进制数据用于数据库存储
-            import base64
-            attachment_files.append({
-                "name": safe_name,
-                "mime_type": upload.content_type or "application/octet-stream",
-                "data_base64": base64.b64encode(file_data).decode("utf-8"),
-            })
-
-        content_parts = [message.strip()] if message.strip() else []
-        if uploaded_paths:
-            content_parts.append(
-                "Uploaded files:\n" + "\n".join(f"- `{path}`" for path in uploaded_paths)
-            )
-        user_content = "\n\n".join(content_parts) or "Please analyze the uploaded file(s)."
-        session.messages.append({
-            "role": "user",
-            "content": build_user_message_content(user_content, uploaded_paths),
-        })
-
-        # Persist session + user message to DB (upsert; idempotent)
-        db.create_session(
-            session_id=session_id,
-            model_name=MODEL_CONFIG["model_name"],
-            config_path=MODEL_CONFIG["path"],
-            system_prompt=system_prompt,
-            title=(message.strip()[:80] or None),
-        )
-        # AI 总结长输入为会话标题 (后台执行，不阻塞主流程)
-        threading.Thread(
-            target=maybe_generate_session_title,
-            args=(session_id, message),
-            daemon=True,
-        ).start()
-        db.save_chat_message(
-            session_id,
-            "user",
-            content=user_content,
-            display_content=message.strip(),
-            attachments=[{"name": Path(p).name, "path": p} for p in uploaded_paths],
-            attachment_files=attachment_files,
+        turn_id, uploaded_paths, _, _ = start_chat_turn(
+            session, message, system_prompt, files
         )
 
         if session.handle is None:
-            session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir, session_id=session_id)
+            session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir, session_id=session.session_id)
 
         data_roots = [str(BENCHMARK_DATA_DIR), str(session.uploads_dir), str(session.output_dir)]
         effective_prompt = build_system_prompt(system_prompt, data_roots)
         lc_messages = build_messages(session.messages, effective_prompt)
     except Exception:
+        if turn_id and db.fail_turn(session.session_id, turn_id, "任务初始化失败，请重试。"):
+            session.messages.append({"role": "assistant", "content": "任务初始化失败，请重试。"})
         session.lock.release()
         raise
 
@@ -2149,8 +2278,9 @@ def chat_stream(
         _final_msg_id: int | None = None
         _final_user_question = message
         _final_image_paths: list[str] = []
+        turn_completed = False
         try:
-            yield sse_event("status", {"message": "正在思考..."})
+            yield sse_event("status", {"message": "正在思考...", "turn_id": turn_id})
             for item in session.handle.stream(
                 lc_messages,
                 config={
@@ -2171,7 +2301,9 @@ def chat_stream(
                     response = item["response"]
                     raw_answer = last_ai_message(response)
                     trace = tool_trace(response)
-                    output_paths = extract_tool_output_files(response)
+                    output_paths, artifact_records = persist_output_artifacts(
+                        session, extract_tool_output_files(response)
+                    )
                     reviewed_answer = session.handle.review_answer_and_artifacts(
                         raw_answer or streamed_text,
                         uploaded_paths,
@@ -2190,35 +2322,20 @@ def chat_stream(
                     geometry = extract_first_output_geometry(output_paths)
                     legend = extract_tool_legend(response) if images else []
 
+                    save_tool_assessments(response, session.session_id, turn_id, artifact_records)
+                    _final_msg_id = db.complete_turn(
+                        session.session_id, turn_id,
+                        final_answer or reviewed_answer or raw_answer or streamed_text,
+                        display_answer,
+                        [{"name": artifact_records[p]["original_name"],
+                          "artifact_id": artifact_records[p]["id"]} for p in output_files],
+                        [{"name": artifact_records[p]["original_name"],
+                          "artifact_id": artifact_records[p]["id"]} for p in images],
+                        trace, elapsed, legend,
+                    )
+                    turn_completed = True
                     session.messages.append(
                         {"role": "assistant", "content": final_answer or reviewed_answer or raw_answer or streamed_text}
-                    )
-                    # 读取输出图片的二进制数据
-                    image_files: list[dict] = []
-                    for img_path in images:
-                        try:
-                            img_data = Path(img_path).read_bytes()
-                            import base64
-                            image_files.append({
-                                "name": Path(img_path).name,
-                                "mime_type": "image/png",
-                                "data_base64": base64.b64encode(img_data).decode("utf-8"),
-                            })
-                        except Exception:
-                            pass
-
-                    _final_msg_id = db.save_chat_message(
-                        session_id,
-                        "assistant",
-                        content=final_answer or reviewed_answer or raw_answer or streamed_text,
-                        display_content=display_answer,
-                        attachments=[_file_descriptor(p) for p in output_files],
-                        images=[_image_descriptor(p) for p in images],
-                        tool_trace=trace,
-                        elapsed_seconds=elapsed,
-                        tool_call_count=len(trace),
-                        image_files=image_files,
-                        legend=legend,
                     )
                     _final_answer_text = display_answer or final_answer or streamed_text
                     _final_image_paths = list(images)
@@ -2226,11 +2343,12 @@ def chat_stream(
                     yield sse_event(
                         "done",
                         {
+                            "turn_id": turn_id,
                             "answer": display_answer or "(empty response)",
                             "elapsed": elapsed,
                             "tool_calls": len(trace),
-                            "images": [file_payload(path) for path in images],
-                            "files": [file_payload(path) for path in output_files],
+                            "images": [artifact_payload(artifact_records[p]) for p in images],
+                            "files": [artifact_payload(artifact_records[p]) for p in output_files],
                             "geometry": geometry,
                             "legend": legend,
                             "trace": trace if show_trace else [],
@@ -2240,27 +2358,31 @@ def chat_stream(
             # 对话结束后生成 PDF 报告（仅在用户明确要求时生成）
             if _final_answer_text and should_generate_report(_final_user_question):
                 yield sse_event("status", {"message": "正在生成报告..."})
-                report_images = [
-                    {"name": Path(p).name, "data": Path(p).read_bytes()}
-                    for p in _final_image_paths
-                    if Path(p).exists()
-                ]
-                report = generate_and_store_pdf_report(
-                    _final_answer_text,
-                    _final_user_question,
-                    session_id,
-                    message_id=_final_msg_id,
-                    images=report_images,
-                )
+                try:
+                    report_images = [
+                        {"name": Path(p).name, "data": Path(p).read_bytes()}
+                        for p in _final_image_paths if Path(p).exists()
+                    ]
+                    report = generate_and_store_pdf_report(
+                        _final_answer_text, _final_user_question,
+                        session.session_id, message_id=_final_msg_id,
+                        images=report_images,
+                    )
+                except Exception:
+                    report = None
                 if report:
                     yield sse_event("report", report)
         except Exception as exc:  # noqa: BLE001
             error_text = "".join(traceback.format_exception(exc))
             matches = ERROR_MEMORY.lookup_all(error_text)
+            public_error = "任务执行或结果保存失败，请重试。"
+            if not turn_completed and turn_id and db.fail_turn(session.session_id, turn_id, public_error):
+                session.messages.append({"role": "assistant", "content": public_error})
             yield sse_event(
                 "error",
                 {
-                    "answer": f"后端调用失败：{exc}",
+                    "turn_id": turn_id,
+                    "answer": public_error,
                     "elapsed": 0,
                     "tool_calls": 0,
                     "images": [],
@@ -2268,13 +2390,17 @@ def chat_stream(
                     "geometry": None,
                     "legend": [],
                     "trace": [],
-                    "error": error_text,
+                    "error": public_error,
                     "memory_suggestions": [
                         {"pattern": pattern, "fix": fix} for pattern, fix in matches
                     ],
                 },
             )
         finally:
+            if not turn_completed and turn_id:
+                cancelled = "请求中断，任务未完成。"
+                if db.fail_turn(session.session_id, turn_id, cancelled, code="cancelled"):
+                    session.messages.append({"role": "assistant", "content": cancelled})
             session.lock.release()
 
     return StreamingResponse(

@@ -370,6 +370,7 @@ function mapApiMessage(m) {
         type: a.type || '',
         url,
         preview,
+        unavailable: Boolean(a.unavailable),
       }
     }),
   }
@@ -1029,7 +1030,7 @@ onMounted(async () => {
                   <strong>{{ fileExtension(file.name) }}</strong>
                 </div>
                 <figcaption :title="file.name">
-                  {{ file.url ? outputFileLabel(file.name) : file.name }}
+                  {{ file.unavailable ? `${file.name}（历史文件已丢失）` : (file.url ? outputFileLabel(file.name) : file.name) }}
                 </figcaption>
               </figure>
             </div>
