@@ -62,3 +62,6 @@ Thumbs.db
 
 # Model folder
 model/*
+docs/*
+test*.py
+!test_retrieval.py

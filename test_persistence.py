@@ -10,6 +10,7 @@ from unittest.mock import patch
 from langchain_core.messages import AIMessage, ToolMessage
 
 from agent.artifacts import ArtifactStore
+from agent.retrieval import RetrievalDocument, RetrievalHit
 import backend_api
 
 
@@ -107,7 +108,15 @@ class DatabaseIntegrationTests(unittest.TestCase):
                 pass
 
         try:
-            with patch.object(backend_api, "AgentHandle", FakeHandle), TestClient(backend_api.app) as client:
+            tool_reference = RetrievalHit(
+                RetrievalDocument(
+                    "tool", "calculate_batch_ndvi", None, "calculate_batch_ndvi",
+                    "NDVI tool guidance", {"description": "NDVI tool guidance"},
+                ), 0.9, "embedding+keyword",
+            )
+            with (patch.object(backend_api, "AgentHandle", FakeHandle),
+                  patch.object(backend_api.RETRIEVAL, "search_tools", return_value=[tool_reference]),
+                  TestClient(backend_api.app) as client):
                 first = client.post(
                     "/api/chat",
                     data={"session_id": session_id, "message": "分析测试"},
@@ -116,9 +125,11 @@ class DatabaseIntegrationTests(unittest.TestCase):
                 self.assertEqual(first.status_code, 200)
                 self.assertIn("完成", first.json()["answer"])
                 self.assertEqual(len(first.json()["files"]), 1)
+                self.assertEqual(first.json()["references"][0]["source_id"], "calculate_batch_ndvi")
                 self.assertEqual(client.get(first.json()["files"][0]["url"]).content, b"metric=2")
                 history = client.get(f"/api/sessions/{session_id}/messages").json()["messages"]
                 self.assertEqual(client.get(history[0]["attachments"][0]["url"]).content, b"sample")
+                self.assertEqual(history[1]["references"][0]["source_id"], "calculate_batch_ndvi")
 
                 backend_api.SESSIONS.pop(session_id, None)
                 self.assertEqual(len(backend_api.get_session(session_id).messages), 2)
@@ -127,6 +138,8 @@ class DatabaseIntegrationTests(unittest.TestCase):
                     data={"session_id": session_id, "message": "继续分析"},
                 )
                 self.assertIn("event: done", second.text)
+                self.assertIn('"references":', second.text)
+                self.assertIn("calculate_batch_ndvi", second.text)
                 turns = db.list_turns(session_id)
                 self.assertEqual([row["status"] for row in turns], ["completed", "completed"])
                 self.assertEqual(len(db.query_assessments(session_id=session_id)), 2)

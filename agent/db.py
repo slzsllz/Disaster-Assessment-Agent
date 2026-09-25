@@ -400,7 +400,7 @@ class Database:
         self, session_id: str, turn_id: str, content: str,
         display_content: str, attachments: list[dict], images: list[dict],
         tool_trace: list[dict], elapsed_seconds: float,
-        legend: list[dict],
+        legend: list[dict], retrieval_refs: list[dict] | None = None,
     ) -> int:
         """Write the answer and mark its turn complete in one transaction."""
         self.require_available()
@@ -408,12 +408,13 @@ class Database:
             cur.execute(
                 """INSERT INTO chat_messages
                    (session_id, role, content, display_content, attachments,
-                    images, tool_trace, elapsed_seconds, tool_call_count, legend)
-                   VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s)
+                    images, tool_trace, elapsed_seconds, tool_call_count,
+                    legend, retrieval_refs)
+                   VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
                 (session_id, content, display_content, Jsonb(attachments),
                  Jsonb(images), Jsonb(tool_trace), elapsed_seconds,
-                 len(tool_trace), Jsonb(legend)),
+                 len(tool_trace), Jsonb(legend), Jsonb(retrieval_refs or [])),
             )
             message_id = cur.fetchone()[0]
             cur.execute(
@@ -487,6 +488,63 @@ class Database:
             logger.warning("get_artifact failed: %s", exc)
             raise DatabaseUnavailable("Could not load artifact") from exc
 
+    def list_session_artifacts(self, session_id: str, limit: int = 200) -> List[dict]:
+        """Only return files owned by this session, newest first."""
+        self.require_available()
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT id, session_id, kind, original_name, mime_type,
+                          size_bytes, sha256, relative_path, created_at
+                   FROM artifacts WHERE session_id = %s
+                   ORDER BY created_at DESC, id DESC LIMIT %s""",
+                (session_id, max(1, min(limit, 500))),
+            )
+            return cur.fetchall()
+
+    def load_retrieval_embeddings(
+        self, source_type: str, source_ids: list[str], session_id: str | None = None,
+    ) -> dict[str, dict]:
+        """Load only vectors for the requested source scope."""
+        if not source_ids:
+            return {}
+        self.require_available()
+        with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT source_id, content_sha256, model_name, dimensions,
+                          embedding FROM retrieval_embeddings
+                   WHERE source_type = %s AND source_id = ANY(%s)
+                     AND session_id IS NOT DISTINCT FROM %s::uuid""",
+                (source_type, source_ids, session_id),
+            )
+            return {row["source_id"]: row for row in cur.fetchall()}
+
+    def upsert_retrieval_embeddings(self, rows: list[dict]) -> None:
+        """Persist one embedding version per source and content hash."""
+        if not rows:
+            return
+        self.require_available()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO retrieval_embeddings
+                   (source_type, source_id, session_id, content_sha256,
+                    model_name, dimensions, embedding)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (source_type, source_id) DO UPDATE SET
+                     session_id = EXCLUDED.session_id,
+                     content_sha256 = EXCLUDED.content_sha256,
+                     model_name = EXCLUDED.model_name,
+                     dimensions = EXCLUDED.dimensions,
+                     embedding = EXCLUDED.embedding,
+                     updated_at = now()""",
+                [
+                    (row["source_type"], row["source_id"], row["session_id"],
+                     row["content_sha256"], row["model_name"],
+                     row["dimensions"], row["embedding"])
+                    for row in rows
+                ],
+            )
+            conn.commit()
+
     def update_message_artifact_refs(
         self, message_id: int, attachments: list[dict],
         images: list[dict], reports: list[dict],
@@ -510,6 +568,7 @@ class Database:
             cur.execute("DELETE FROM assessment_results WHERE session_id = %s", (session_id,))
             cur.execute("DELETE FROM agent_turns WHERE session_id = %s", (session_id,))
             cur.execute("DELETE FROM chat_messages WHERE session_id = %s", (session_id,))
+            cur.execute("DELETE FROM retrieval_embeddings WHERE session_id = %s", (session_id,))
             cur.execute("DELETE FROM artifacts WHERE session_id = %s", (session_id,))
             cur.execute(
                 "UPDATE sessions SET message_count = 0, updated_at = now() WHERE id = %s",

@@ -353,6 +353,7 @@ function mapApiMessage(m) {
     error: '',
     images: (m.images || []).map((img) => ({ name: img.name || 'image', url: img.url })),
     legend: m.legend || [],
+    references: m.references || [],
     report: m.report || null,
     attachments: (m.attachments || []).map((a) => {
       const name = a.name || 'file'
@@ -695,6 +696,7 @@ function handleStreamBlock(block, assistantId) {
     message.meta = `${Number(payload.elapsed || 0).toFixed(1)}s · ${payload.tool_calls || 0} tool call(s)`
     message.images = payload.images || []
     message.legend = payload.legend || []
+    message.references = payload.references || []
     message.attachments = (payload.files || []).map((file) => ({
       id: file.url || file.name,
       name: file.name || 'file',
@@ -713,6 +715,7 @@ function handleStreamBlock(block, assistantId) {
     message.images = []
     message.legend = []
     message.attachments = []
+    message.references = []
     message.error = payload.error || ''
   }
   followBottomIfNeeded()
@@ -776,6 +779,7 @@ async function sendMessage() {
         message.meta = `${Number(data.elapsed || 0).toFixed(1)}s · ${data.tool_calls || 0} tool call(s)`
         message.images = data.images || []
         message.legend = data.legend || []
+        message.references = data.references || []
         message.attachments = (data.files || []).map((file) => ({
           id: file.url || file.name,
           name: file.name || 'file',
@@ -1035,6 +1039,15 @@ onMounted(async () => {
               </figure>
             </div>
             <span v-if="message.meta" class="message-meta">{{ message.meta }}</span>
+            <div v-if="message.references?.length" class="retrieval-references">
+              <span class="retrieval-label">检索参考</span>
+              <template v-for="reference in message.references" :key="`${reference.source_type}-${reference.source_id}`">
+                <a v-if="reference.url" :href="reference.url" target="_blank" rel="noreferrer">
+                  {{ reference.title }}
+                </a>
+                <span v-else>{{ reference.title }}（工具说明）</span>
+              </template>
+            </div>
             <div v-if="message.images?.length" class="result-images">
               <figure
                 v-for="(image, imageIndex) in message.images"

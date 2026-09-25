@@ -712,6 +712,23 @@ input[type="checkbox"] {
   font-size: 0.78rem;
 }
 
+.retrieval-references {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.7rem;
+  margin-top: 0.45rem;
+  color: #626b75;
+  font-size: 0.78rem;
+}
+
+.retrieval-references a {
+  color: #1768a6;
+}
+
+.retrieval-label {
+  font-weight: 700;
+}
+
 .result-images {
   display: flex;
   flex-direction: column;

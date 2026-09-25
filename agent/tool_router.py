@@ -56,6 +56,7 @@ class ToolRouter:
             raise ValueError("MCP tool names must be unique across servers")
         self._last_question: str | None = None
         self._selected: list[Any] = []
+        self._retrieved_descriptions: list[str] = []
         self.catalogue = "\n".join(
             f"{tool.name}: {self._summary(tool.description)}" for tool in self.tools
         )
@@ -70,10 +71,19 @@ class ToolRouter:
         tokens = [part for part in name.lower().split("_") if len(part) >= 3]
         return sum(len(part) for part in tokens if part in question.lower())
 
+    def set_retrieved_tools(self, hits: Sequence[Any]) -> None:
+        """Pass the current turn's full retrieved tool descriptions to routing."""
+        self._retrieved_descriptions = [
+            f"{hit.document.source_id}: {hit.document.metadata.get('description', '')[:1400]}"
+            for hit in hits if hit.document.source_id in self.by_name
+        ][:4]
+        self._last_question = None
+
     async def select(self, messages: Sequence[Any]) -> list[Any]:
         conversational = [
             message for message in messages
             if isinstance(message, (HumanMessage, AIMessage))
+            and getattr(message, "name", None) != "retrieval_context"
             and _message_text(message.content).strip()
         ]
         question = next(
@@ -105,7 +115,10 @@ class ToolRouter:
                     "Include tools needed for likely intermediate steps, but avoid unrelated tools. "
                     "For a purely conversational question, return an empty list. "
                     "Reply ONLY with JSON: {\"tools\": [\"exact_name\", ...]}.\n\n"
-                    "Available tools:\n" + self.catalogue
+                    "Available tools:\n" + self.catalogue +
+                    ("\n\nFull descriptions of retrieved candidates:\n" +
+                     "\n".join(self._retrieved_descriptions)
+                     if self._retrieved_descriptions else "")
                 )),
                 HumanMessage(content=context),
             ])

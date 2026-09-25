@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import mimetypes
 import os
 import queue
@@ -41,6 +42,7 @@ from agent.artifacts import ArtifactStore, artifact_payload
 from agent.tool_router import ToolRouter
 from agent.tool_policy import CURATED_TOOLS_BY_SERVER, CURATED_TOOL_NAMES, select_curated_tools
 from agent.db import DatabaseUnavailable, db
+from agent.retrieval import EXPLICIT_PRIOR_RE, RetrievalService, format_reference_context
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +89,7 @@ MCP_CHILD_ENV_KEYS = (
 )
 
 load_dotenv(override=True)
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +103,7 @@ BENCHMARK_DATA_DIR = PROJECT_ROOT / "benchmark" / "data"
 TEMP_BASE = PROJECT_ROOT / "tmp" / "fastapi_out"
 TEMP_BASE.mkdir(parents=True, exist_ok=True)
 ARTIFACT_STORE = ArtifactStore(PROJECT_ROOT / "data" / "artifacts", db)
+RETRIEVAL = RetrievalService(db, ARTIFACT_STORE)
 ERROR_MEMORY = ErrorMemory(AGENT_DIR / "error_memory.json", db=db)
 
 DEFAULT_CONFIG = AGENT_DIR / next(
@@ -533,7 +537,10 @@ def choose_frontend_artifacts(answer_text: str, output_paths: list[str]) -> tupl
     return split_output_files(output_paths)
 
 
-def build_messages(history: list[dict[str, str]], system_prompt: str | None) -> list:
+def build_messages(
+    history: list[dict[str, str]], system_prompt: str | None,
+    retrieval_context: str = "",
+) -> list:
     messages = []
     if system_prompt:
         messages.append(SystemMessage(content=system_prompt))
@@ -542,6 +549,14 @@ def build_messages(history: list[dict[str, str]], system_prompt: str | None) -> 
             messages.append(HumanMessage(content=item["content"]))
         elif item["role"] == "assistant":
             messages.append(AIMessage(content=item["content"]))
+    if retrieval_context:
+        # Keep references separate from the user's request and out of the router's query.
+        reference = HumanMessage(content=retrieval_context, name="retrieval_context")
+        last_user = next(
+            (index for index in range(len(messages) - 1, -1, -1)
+             if isinstance(messages[index], HumanMessage)), len(messages),
+        )
+        messages.insert(last_user, reference)
     return messages
 
 
@@ -875,7 +890,7 @@ class AgentHandle:
         self.thread.start()
         self.ready.get(timeout=20)
 
-        async def setup() -> tuple[Any, Any, list[Any]]:
+        async def setup() -> tuple[Any, Any, Any, list[Any], ToolRouter]:
             from langchain_mcp_adapters.client import MultiServerMCPClient
             from langgraph.prebuilt import create_react_agent
 
@@ -894,9 +909,9 @@ class AgentHandle:
             agent = create_react_agent(
                 select_model, tools, pre_model_hook=feedback.before_model
             )
-            return agent, llm, client, tools
+            return agent, llm, client, tools, router
 
-        self.agent, self.llm, self.client, self.tools = self.run(setup())
+        self.agent, self.llm, self.client, self.tools, self.router = self.run(setup())
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self.loop)
@@ -1160,6 +1175,32 @@ def start_chat_turn(
         target=maybe_generate_session_title, args=(session_id, message), daemon=True,
     ).start()
     return turn_id, uploaded_paths, attachments, user_content
+
+
+def retrieve_turn_context(
+    session: ChatSession, question: str, current_attachments: list[dict],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Retrieve tool guidance and earlier files without changing chat history."""
+    try:
+        tools = list(getattr(session.handle, "tools", []))
+        tool_hits = RETRIEVAL.search_tools(question, tools)
+        previous_file_hits = (
+            RETRIEVAL.search_artifacts(
+                question, session.session_id,
+                exclude_ids={item["artifact_id"] for item in current_attachments},
+            )
+            if not current_attachments or EXPLICIT_PRIOR_RE.search(question) else []
+        )
+        router = getattr(session.handle, "router", None)
+        if router is not None:
+            router.set_retrieved_tools(tool_hits)
+        hits = [*tool_hits, *previous_file_hits]
+        return format_reference_context(tool_hits, previous_file_hits), [
+            hit.public() for hit in hits
+        ]
+    except Exception:
+        logger.exception("Retrieval failed; continuing without references")
+        return "", []
 
 
 def persist_output_artifacts(
@@ -1936,6 +1977,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
         "images": images,
         "legend": row.get("legend") or [],
         "tool_trace": row.get("tool_trace") or [],
+        "references": row.get("retrieval_refs") or [],
         "elapsed_seconds": row.get("elapsed_seconds"),
         "tool_call_count": row.get("tool_call_count"),
         "created_at": row.get("created_at"),
@@ -2134,7 +2176,7 @@ def chat(
     turn_id: str | None = None
     with session.lock:
         try:
-            turn_id, uploaded_paths, _, _ = start_chat_turn(
+            turn_id, uploaded_paths, current_attachments, _ = start_chat_turn(
                 session, message, system_prompt, files
             )
 
@@ -2143,7 +2185,10 @@ def chat(
 
             data_roots = [str(BENCHMARK_DATA_DIR), str(session.uploads_dir), str(session.output_dir)]
             effective_prompt = build_system_prompt(system_prompt, data_roots)
-            lc_messages = build_messages(session.messages, effective_prompt)
+            retrieval_context, retrieval_refs = retrieve_turn_context(
+                session, message, current_attachments
+            )
+            lc_messages = build_messages(session.messages, effective_prompt, retrieval_context)
 
             started = time.time()
             response = session.handle.invoke(
@@ -2183,7 +2228,7 @@ def chat(
                   "artifact_id": artifact_records[p]["id"]} for p in output_files],
                 [{"name": artifact_records[p]["original_name"],
                   "artifact_id": artifact_records[p]["id"]} for p in images],
-                trace, elapsed, legend,
+                trace, elapsed, legend, retrieval_refs,
             )
             session.messages.append(
                 {"role": "assistant", "content": final_answer or reviewed_answer or raw_answer}
@@ -2215,6 +2260,7 @@ def chat(
                 "geometry": geometry,
                 "legend": legend,
                 "trace": trace if show_trace else [],
+                "references": retrieval_refs,
                 "report": report,
             }
         except Exception as exc:  # noqa: BLE001
@@ -2254,7 +2300,7 @@ def chat_stream(
     session.lock.acquire()
     turn_id: str | None = None
     try:
-        turn_id, uploaded_paths, _, _ = start_chat_turn(
+        turn_id, uploaded_paths, current_attachments, _ = start_chat_turn(
             session, message, system_prompt, files
         )
 
@@ -2263,7 +2309,6 @@ def chat_stream(
 
         data_roots = [str(BENCHMARK_DATA_DIR), str(session.uploads_dir), str(session.output_dir)]
         effective_prompt = build_system_prompt(system_prompt, data_roots)
-        lc_messages = build_messages(session.messages, effective_prompt)
     except Exception:
         if turn_id and db.fail_turn(session.session_id, turn_id, "任务初始化失败，请重试。"):
             session.messages.append({"role": "assistant", "content": "任务初始化失败，请重试。"})
@@ -2280,6 +2325,11 @@ def chat_stream(
         _final_image_paths: list[str] = []
         turn_completed = False
         try:
+            yield sse_event("status", {"message": "正在检索参考资料...", "turn_id": turn_id})
+            retrieval_context, retrieval_refs = retrieve_turn_context(
+                session, message, current_attachments
+            )
+            lc_messages = build_messages(session.messages, effective_prompt, retrieval_context)
             yield sse_event("status", {"message": "正在思考...", "turn_id": turn_id})
             for item in session.handle.stream(
                 lc_messages,
@@ -2331,7 +2381,7 @@ def chat_stream(
                           "artifact_id": artifact_records[p]["id"]} for p in output_files],
                         [{"name": artifact_records[p]["original_name"],
                           "artifact_id": artifact_records[p]["id"]} for p in images],
-                        trace, elapsed, legend,
+                        trace, elapsed, legend, retrieval_refs,
                     )
                     turn_completed = True
                     session.messages.append(
@@ -2352,6 +2402,7 @@ def chat_stream(
                             "geometry": geometry,
                             "legend": legend,
                             "trace": trace if show_trace else [],
+                            "references": retrieval_refs,
                         },
                     )
 
