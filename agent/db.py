@@ -401,6 +401,7 @@ class Database:
         display_content: str, attachments: list[dict], images: list[dict],
         tool_trace: list[dict], elapsed_seconds: float,
         legend: list[dict], retrieval_refs: list[dict] | None = None,
+        review: dict | None = None,
     ) -> int:
         """Write the answer and mark its turn complete in one transaction."""
         self.require_available()
@@ -409,19 +410,20 @@ class Database:
                 """INSERT INTO chat_messages
                    (session_id, role, content, display_content, attachments,
                     images, tool_trace, elapsed_seconds, tool_call_count,
-                    legend, retrieval_refs)
-                   VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    legend, retrieval_refs, review)
+                   VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
                 (session_id, content, display_content, Jsonb(attachments),
                  Jsonb(images), Jsonb(tool_trace), elapsed_seconds,
-                 len(tool_trace), Jsonb(legend), Jsonb(retrieval_refs or [])),
+                 len(tool_trace), Jsonb(legend), Jsonb(retrieval_refs or []),
+                 Jsonb(review or {"status": "skipped"})),
             )
             message_id = cur.fetchone()[0]
             cur.execute(
                 """UPDATE agent_turns SET status = 'completed',
-                   assistant_message_id = %s, updated_at = now(),
+                   assistant_message_id = %s, review_status = %s, updated_at = now(),
                    finished_at = now() WHERE id = %s AND status = 'running'""",
-                (message_id, turn_id),
+                (message_id, (review or {}).get("status", "skipped"), turn_id),
             )
             if cur.rowcount != 1:
                 raise RuntimeError("Turn is missing or already finished")
@@ -581,7 +583,7 @@ class Database:
         with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """SELECT id, session_id, status, user_message_id,
-                   assistant_message_id, error_code, error_message,
+                   assistant_message_id, error_code, error_message, review_status,
                    started_at, updated_at, finished_at
                    FROM agent_turns WHERE session_id = %s
                    ORDER BY started_at ASC, id ASC""",

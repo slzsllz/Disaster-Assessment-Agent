@@ -354,6 +354,8 @@ function mapApiMessage(m) {
     images: (m.images || []).map((img) => ({ name: img.name || 'image', url: img.url })),
     legend: m.legend || [],
     references: m.references || [],
+    review: m.review || null,
+    reviewPending: false,
     report: m.report || null,
     attachments: (m.attachments || []).map((a) => {
       const name = a.name || 'file'
@@ -689,14 +691,17 @@ function handleStreamBlock(block, assistantId) {
 
   if (eventName === 'delta') {
     message.content += payload.text || ''
+    message.reviewPending = true
   } else if (eventName === 'status') {
     message.meta = payload.message || ''
   } else if (eventName === 'done') {
+    message.reviewPending = false
     message.content = payload.answer || message.content || '(empty response)'
     message.meta = `${Number(payload.elapsed || 0).toFixed(1)}s · ${payload.tool_calls || 0} tool call(s)`
     message.images = payload.images || []
     message.legend = payload.legend || []
     message.references = payload.references || []
+    message.review = payload.review || null
     message.attachments = (payload.files || []).map((file) => ({
       id: file.url || file.name,
       name: file.name || 'file',
@@ -710,12 +715,14 @@ function handleStreamBlock(block, assistantId) {
   } else if (eventName === 'report') {
     message.report = payload
   } else if (eventName === 'error') {
+    message.reviewPending = false
     message.content = payload.answer || '后端调用失败'
     message.meta = ''
     message.images = []
     message.legend = []
     message.attachments = []
     message.references = []
+    message.review = null
     message.error = payload.error || ''
   }
   followBottomIfNeeded()
@@ -780,6 +787,8 @@ async function sendMessage() {
         message.images = data.images || []
         message.legend = data.legend || []
         message.references = data.references || []
+        message.review = data.review || null
+        message.reviewPending = false
         message.attachments = (data.files || []).map((file) => ({
           id: file.url || file.name,
           name: file.name || 'file',
@@ -825,6 +834,7 @@ async function sendMessage() {
       message.content = `后端连接失败：${error.message}`
       message.meta = ''
       message.error = String(error)
+      message.reviewPending = false
     }
     scrollToBottom()
   } finally {
@@ -1009,6 +1019,7 @@ onMounted(async () => {
           <div class="avatar">{{ message.role === 'user' ? '☻' : '▣' }}</div>
           <div class="message-body">
             <div class="markdown-body" v-html="renderMarkdown(message.content)" />
+            <span v-if="message.reviewPending" class="review-draft-label">草稿 · 待审核</span>
             <div v-if="message.attachments?.length" class="attachment-list">
               <figure
                 v-for="file in message.attachments"
@@ -1039,6 +1050,10 @@ onMounted(async () => {
               </figure>
             </div>
             <span v-if="message.meta" class="message-meta">{{ message.meta }}</span>
+            <div v-if="message.review && message.review.status !== 'skipped'" class="review-result" :class="`review-${message.review.status}`">
+              <strong>{{ { passed: '审核通过', revised: '已依据证据修订', blocked: '审核未通过', unavailable: '审核未完成' }[message.review.status] || '审核状态未知' }}</strong>
+              <span v-for="issue in message.review.issues || []" :key="`${issue.code}-${issue.message}`">{{ issue.message }}</span>
+            </div>
             <div v-if="message.references?.length" class="retrieval-references">
               <span class="retrieval-label">检索参考</span>
               <template v-for="reference in message.references" :key="`${reference.source_type}-${reference.source_id}`">

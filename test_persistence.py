@@ -70,6 +70,56 @@ class PersistenceTests(unittest.TestCase):
 
 @unittest.skipUnless(os.getenv("RUN_DB_INTEGRATION") == "1", "requires local PostgreSQL")
 class DatabaseIntegrationTests(unittest.TestCase):
+    def test_blocked_review_is_persisted_without_assessment(self):
+        from dotenv import load_dotenv
+        from fastapi.testclient import TestClient
+        from agent.db import db
+
+        load_dotenv(".env")
+        self.assertTrue(db.migrate())
+        session_id = str(uuid.uuid4())
+
+        class FakeHandle:
+            def __init__(self, config, temp_dir, session_id=""):
+                pass
+
+            def invoke(self, messages, config=None):
+                return {"messages": [
+                    AIMessage(content="", tool_calls=[{
+                        "id": "damage-1", "name": "assess_building_damage", "args": {},
+                    }]),
+                    ToolMessage(content=json.dumps({
+                        "count_unit": "pixels", "building_total": 10,
+                        "no_damage": 2, "minor_damage": 1, "major_damage": 1,
+                        "destroyed": 1, "damaged": 3,
+                    }), name="assess_building_damage", tool_call_id="damage-1"),
+                    AIMessage(content="<Conclusion>损毁 3 栋建筑</Conclusion>"),
+                ]}
+
+            def review_answer_and_artifacts(self, *args):
+                raise AssertionError("deterministic failure must block before model review")
+
+            def close(self):
+                pass
+
+        try:
+            with (patch.object(backend_api, "AgentHandle", FakeHandle),
+                  patch.object(backend_api, "retrieve_turn_context", return_value=("", [])),
+                  TestClient(backend_api.app) as client):
+                response = client.post("/api/chat", data={
+                    "session_id": session_id, "message": "建筑损毁评估",
+                })
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["review"]["status"], "blocked")
+                self.assertNotIn("3 栋", response.json()["answer"])
+                history = client.get(f"/api/sessions/{session_id}/messages").json()["messages"]
+                self.assertEqual(history[-1]["review"]["status"], "blocked")
+                self.assertEqual(db.list_turns(session_id)[-1]["review_status"], "blocked")
+                self.assertEqual(db.query_assessments(session_id=session_id), [])
+        finally:
+            db.delete_session(session_id)
+            backend_api.SESSIONS.pop(session_id, None)
+
     def test_chat_stream_restart_artifact_and_assessment(self):
         from dotenv import load_dotenv
         from fastapi.testclient import TestClient
@@ -101,8 +151,13 @@ class DatabaseIntegrationTests(unittest.TestCase):
             def stream(self, messages, config=None):
                 yield {"type": "final", "response": self.invoke(messages, config)}
 
-            def review_answer_and_artifacts(self, raw, uploaded, outputs):
-                return raw
+            def review_answer_and_artifacts(self, raw, uploaded, outputs, question, evidence, checks):
+                return json.dumps({
+                    "status": "passed", "issues": [], "revised_answer": "",
+                    "supplement": "", "artifacts": {
+                        "display": [], "download": [Path(path).name for path in outputs],
+                    },
+                })
 
             def close(self):
                 pass
@@ -130,6 +185,7 @@ class DatabaseIntegrationTests(unittest.TestCase):
                 history = client.get(f"/api/sessions/{session_id}/messages").json()["messages"]
                 self.assertEqual(client.get(history[0]["attachments"][0]["url"]).content, b"sample")
                 self.assertEqual(history[1]["references"][0]["source_id"], "calculate_batch_ndvi")
+                self.assertEqual(history[1]["review"]["status"], "passed")
 
                 backend_api.SESSIONS.pop(session_id, None)
                 self.assertEqual(len(backend_api.get_session(session_id).messages), 2)
@@ -142,6 +198,7 @@ class DatabaseIntegrationTests(unittest.TestCase):
                 self.assertIn("calculate_batch_ndvi", second.text)
                 turns = db.list_turns(session_id)
                 self.assertEqual([row["status"] for row in turns], ["completed", "completed"])
+                self.assertEqual([row["review_status"] for row in turns], ["passed", "passed"])
                 self.assertEqual(len(db.query_assessments(session_id=session_id)), 2)
         finally:
             db.delete_session(session_id)

@@ -148,6 +148,14 @@ python -c "from agent.web_search import search_web; print(search_web('地震 灾
 
 在页面上传遥感影像或相关数据，描述要识别的灾害和希望得到的结果。涉及灾前灾后对比时，注明各文件的时间和角色。执行完成后，页面会展示结论和可用的结果文件；开启轨迹显示后还能查看工具调用过程。具有地理范围的评估可在地图中查看。需要 PDF 时，在消息中明确提出“生成报告”。
 
+### 结果审核
+
+有工具调用、文件或实时搜索的轮次会进入结果审核。后端先检查工具是否成功、关键像元统计是否一致、产物是否存在且可读取，以及实时问题是否有联网来源；严重错误会阻止发布评估结论。随后模型根据工具结果、来源链接、文件元数据和小尺寸图片预览返回结构化审核意见，可标记 `passed`（通过）、`revised`（依据证据修订）或 `blocked`（证据不足或存在严重问题）。模型审核异常时标记 `unavailable`，并明确展示未经审核的草稿。普通闲聊标记 `skipped`。
+
+审核状态、问题和精简证据快照保存在每轮消息中，轮次记录保存审核状态，重新打开历史会话仍可查看。流式生成中的文字会标记为“草稿 · 待审核”，最终 `done` 事件给出审核后的文本。只有审核通过或完成修订的评估结果才写入 `assessment_results`；审核阻断或不可用时不会生成 PDF 报告。审核仍依赖模型判断复杂语义；`passed` 不等于现场核验或人工审批。
+
+默认由主模型执行二次审核。如需使用独立的多模态审核模型，可在 `.env` 中配置 `REVIEW_MODEL_NAME`、`REVIEW_MODEL_URL` 和 `REVIEW_MODEL_API_KEY`；审核模型需要兼容 OpenAI Chat Completions 接口并支持图片输入。未设置这些变量时沿用主模型。
+
 主要接口：
 
 | 接口 | 作用 |
@@ -177,7 +185,7 @@ python scripts/migrate_legacy_artifacts.py --apply
 ## 验证与更多文档
 
 ```bash
-python -m unittest test_error_feedback test_tool_policy test_tool_router test_persistence test_retrieval test_web_search
+python -m unittest test_error_feedback test_tool_policy test_tool_router test_persistence test_retrieval test_web_search test_review
 RUN_DB_INTEGRATION=1 python -m unittest test_persistence.DatabaseIntegrationTests test_retrieval.RetrievalDatabaseTests
 cd frontend/chatDisaster && npm run build
 ```

@@ -721,6 +721,26 @@ input[type="checkbox"] {
   font-size: 0.78rem;
 }
 
+.review-result {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.65rem;
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+  color: #4d6472;
+}
+
+.review-result strong { color: #176a57; }
+.review-blocked strong, .review-unavailable strong { color: #a33a29; }
+.review-revised strong { color: #8b6300; }
+
+.review-draft-label {
+  display: inline-block;
+  margin-top: 0.45rem;
+  color: #9a6c16;
+  font-size: 0.78rem;
+}
+
 .retrieval-references a {
   color: #1768a6;
 }
