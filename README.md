@@ -2,7 +2,7 @@
 
 面向遥感影像的灾害评估智能体。用户可以在网页中上传影像或地理数据，用自然语言提出分析任务；后端通过 LangGraph 调用经过筛选的 MCP 工具，返回文字结论、可下载的分析产物，并在有空间范围时将结果显示在地图上。
 
-当前默认工具涵盖建筑损毁、洪水淹没、火烧迹地、溢油和藻华识别，以及遥感指数、变化趋势、空间统计和 GeoAI 分析。默认接入范围以 [`agent/tool_policy.py`](agent/tool_policy.py) 为准；工具文件存在并不代表已接入智能体。需要报告时，可以在对话中明确要求生成 PDF。
+当前默认工具涵盖建筑损毁、洪水淹没、火烧迹地、溢油和藻华识别，以及遥感指数、变化趋势、空间统计、GeoAI 分析和联网搜索。默认接入范围以 [`agent/tool_policy.py`](agent/tool_policy.py) 为准；工具文件存在并不代表已接入智能体。需要报告时，可以在对话中明确要求生成 PDF。
 
 ## 项目结构
 
@@ -114,6 +114,36 @@ EMBED_MODEL_NAME=Qwen3-Embedding-4B
 
 确保后端机器可访问该地址，并可通过 `curl --noproxy '*' http://172.31.233.78:8000/health` 检查。向量保存在 PostgreSQL 的 `retrieval_embeddings` 表中，服务暂时不可用时会使用关键词检索。当前语料规模较小，相似度在 Python 中计算，不要求安装 `pgvector`。检索到的文件严格限制在当前会话；回答下方会显示本轮使用的工具说明和文件引用。
 
+### 6. 配置联网搜索
+
+`web_search` 已接入智能体。询问“今天的地震新闻”“搜索最新洪水预警”等实时问题时，路由会提供这个工具。搜索结果包含标题、摘要、原始链接、发布时间和检索时间；本轮链接会保存在会话历史中，并显示在回答下方。外部摘要仅作参考，重要灾情应打开来源核实。
+
+未配置搜索服务时，默认使用 Google News RSS，**只能搜索新闻**，不代表全网网页。通用网页搜索可在根目录 `.env` 选择以下一种配置：
+
+```dotenv
+# Brave Search API（需要自行申请密钥）
+WEB_SEARCH_PROVIDER=brave
+BRAVE_SEARCH_API_KEY=your-brave-search-key
+
+# 或自建 SearXNG，并启用 JSON 返回格式
+# WEB_SEARCH_PROVIDER=searxng
+# SEARXNG_URL=http://your-searxng-host:8080
+
+# 可选：每次请求的超时秒数，限制在 2–20 秒
+WEB_SEARCH_TIMEOUT_SECONDS=10
+
+# 可选：后端作为 systemd 服务运行且需通过代理访问外网时
+# WEB_SEARCH_PROXY=socks5h://127.0.0.1:your-proxy-port
+```
+
+也可以省略 `WEB_SEARCH_PROVIDER`：后端依次选用已配置的 Brave、SearXNG，否则使用新闻检索。若明确设置 `WEB_SEARCH_PROVIDER=news`，则始终使用免密钥新闻检索。修改 `.env` 后重启后端。SearXNG 的 `settings.yml` 须将 `json` 加入 `search.formats`；其 [搜索 API 文档](https://docs.searxng.org/dev/search_api.html) 和 [Brave Web Search API 文档](https://api-dashboard.search.brave.com/app/documentation/web-search) 提供服务端配置说明。若机器通过 SOCKS 代理访问外网，Python 环境还需要 `requests[socks]`。`WEB_SEARCH_PROXY` 只影响搜索请求；不设置时沿用进程的标准代理环境变量。
+
+可先在项目根目录验证搜索工具：
+
+```bash
+python -c "from agent.web_search import search_web; print(search_web('地震 灾害', 3))"
+```
+
 ## 使用方式
 
 在页面上传遥感影像或相关数据，描述要识别的灾害和希望得到的结果。涉及灾前灾后对比时，注明各文件的时间和角色。执行完成后，页面会展示结论和可用的结果文件；开启轨迹显示后还能查看工具调用过程。具有地理范围的评估可在地图中查看。需要 PDF 时，在消息中明确提出“生成报告”。
@@ -147,7 +177,7 @@ python scripts/migrate_legacy_artifacts.py --apply
 ## 验证与更多文档
 
 ```bash
-python -m unittest test_error_feedback test_tool_policy test_tool_router test_persistence test_retrieval
+python -m unittest test_error_feedback test_tool_policy test_tool_router test_persistence test_retrieval test_web_search
 RUN_DB_INTEGRATION=1 python -m unittest test_persistence.DatabaseIntegrationTests test_retrieval.RetrievalDatabaseTests
 cd frontend/chatDisaster && npm run build
 ```

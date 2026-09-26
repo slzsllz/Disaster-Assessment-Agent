@@ -39,6 +39,7 @@ SERVER_TAGS = {
     "Inversion": "反演 地表温度 水质 土壤湿度 temperature inversion",
     "Perception": "阈值分割 栅格 像元 threshold raster",
     "Statistics": "统计 比例 面积 像元 percentage count statistics",
+    "WebSearch": "联网 搜索 最新 新闻 实时 灾害 current web news search",
 }
 ARTIFACT_TAGS = {
     "upload": "用户上传 原始文件 输入影像 upload input image",
@@ -58,7 +59,7 @@ TOOL_TASK_RE = re.compile(
     r"灾|遥感|评估|分析|检测|提取|分割|计算|统计|识别|变化|趋势|指数|"
     r"洪水|火灾|溢油|藻华|影像|图像|栅格|水体|建筑|植被|干旱|水质|温度|"
     r"湿地|冰雪|烧毁|损毁|地震|海洋|热点|阈值|像元|NDVI|NDWI|NBR|"
-    r"assess|analy[sz]e|detect|segment|flood|fire|raster|image",
+    r"联网|搜索|新闻|最新|近期|实时|今天|assess|analy[sz]e|detect|segment|flood|fire|raster|image|current|latest|news|search",
     re.IGNORECASE,
 )
 

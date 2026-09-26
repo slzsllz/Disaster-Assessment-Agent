@@ -9,7 +9,8 @@ class ToolPolicyTests(unittest.TestCase):
     def test_default_configuration_starts_only_reviewed_servers(self):
         configured = set(load_model_config()["mcp_servers"])
         self.assertEqual(configured, set(CURATED_TOOLS_BY_SERVER))
-        self.assertEqual(len(CURATED_TOOL_NAMES), 39)
+        self.assertEqual(len(CURATED_TOOL_NAMES), 40)
+        self.assertIn("web_search", CURATED_TOOL_NAMES)
         self.assertNotIn("PestDetection", configured)
         self.assertNotIn("LandslideSegmentation", configured)
         self.assertNotIn("GeoContextQuery", configured)

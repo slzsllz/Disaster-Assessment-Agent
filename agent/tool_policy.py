@@ -45,6 +45,7 @@ CURATED_TOOLS_BY_SERVER: dict[str, tuple[str, ...]] = {
         "calculate_multi_band_threshold_ratio", "count_pixels_satisfying_conditions",
         "calculate_band_mean_by_condition", "get_percentile_value_from_image",
     ),
+    "WebSearch": ("web_search",),
 }
 
 CURATED_TOOL_NAMES = frozenset(

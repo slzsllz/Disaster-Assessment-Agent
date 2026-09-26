@@ -15,6 +15,11 @@ FALLBACK_TOOLS = (
     "detect_fire_burned_area_change", "extract_oil_spill_area",
     "detect_algal_bloom", "geoai_semantic_segmentation",
 )
+LIVE_SEARCH_RE = re.compile(
+    r"联网|上网|网上|搜索|检索网页|查新闻|最新|近期|实时|今天|本周|"
+    r"当前.{0,12}(?:灾情|新闻|预警)|search (?:the )?web|latest|recent|today|current news",
+    re.IGNORECASE,
+)
 
 
 def _message_text(content: Any) -> str:
@@ -113,6 +118,7 @@ class ToolRouter:
                     "You select tools for a remote-sensing/disaster-assessment agent. "
                     "Choose at most 16 exact tool names from the catalogue. "
                     "Include tools needed for likely intermediate steps, but avoid unrelated tools. "
+                    "Choose web_search for current events, recent warnings, news, or explicit internet search. "
                     "For a purely conversational question, return an empty list. "
                     "Reply ONLY with JSON: {\"tools\": [\"exact_name\", ...]}.\n\n"
                     "Available tools:\n" + self.catalogue +
@@ -130,7 +136,8 @@ class ToolRouter:
             # The main answer must still work if the routing LLM call fails.
             routing_failed = True
 
-        names = list(dict.fromkeys([*explicit, *selected_names]))[:MAX_TOOLS_PER_TURN]
+        live = ["web_search"] if "web_search" in self.by_name and LIVE_SEARCH_RE.search(question) else []
+        names = list(dict.fromkeys([*live, *explicit, *selected_names]))[:MAX_TOOLS_PER_TURN]
         if not names and question:
             ranked = sorted(
                 self.by_name, key=lambda name: self._fallback_score(name, question),
