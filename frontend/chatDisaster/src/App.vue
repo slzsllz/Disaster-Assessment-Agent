@@ -55,6 +55,7 @@ user-facing analysis outside the <Conclusion> block.
 const recursionLimit = ref(40)
 const maxExecutionTime = ref(600)
 const showTrace = ref(false)
+const forceWebSearch = ref(false)
 const inputText = ref('')
 const attachments = ref([])
 const fileInputRef = ref(null)
@@ -656,7 +657,7 @@ function followBottomIfNeeded() {
   })
 }
 
-function createChatFormData(text, localAttachments) {
+function createChatFormData(text, localAttachments, requiredWebSearch) {
   const formData = new FormData()
   formData.append('session_id', sessionId.value)
   formData.append('message', text)
@@ -664,6 +665,7 @@ function createChatFormData(text, localAttachments) {
   formData.append('recursion_limit', String(recursionLimit.value))
   formData.append('max_execution_time', String(maxExecutionTime.value))
   formData.append('show_trace', String(showTrace.value))
+  formData.append('required_web_search', String(requiredWebSearch))
   localAttachments.forEach((item) => {
     formData.append('files', item.file, item.name)
   })
@@ -732,8 +734,10 @@ async function sendMessage() {
   if (isSending.value) return
   const text = inputText.value.trim()
   if (!text && attachments.value.length === 0) return
+  if (forceWebSearch.value && !text) return
 
   const localAttachments = [...attachments.value]
+  const requiredWebSearch = forceWebSearch.value
   writeSessionIdToUrl(sessionId.value)
   messages.value.push({
     id: crypto.randomUUID(),
@@ -769,12 +773,12 @@ async function sendMessage() {
   try {
     const response = await fetch('/api/chat/stream', {
       method: 'POST',
-      body: createChatFormData(text, localAttachments),
+      body: createChatFormData(text, localAttachments, requiredWebSearch),
     })
     if (response.status === 404) {
       const fallbackResponse = await fetch('/api/chat', {
         method: 'POST',
-        body: createChatFormData(text, localAttachments),
+        body: createChatFormData(text, localAttachments, requiredWebSearch),
       })
       if (!fallbackResponse.ok) {
         throw new Error(`HTTP ${fallbackResponse.status}`)
@@ -1145,14 +1149,29 @@ onMounted(async () => {
           </div>
           <textarea
             v-model="inputText"
-            placeholder="输入问题，或添加栅格/图片文件；时序数据请按时间先后顺序上传"
+            :placeholder="forceWebSearch ? '输入需要联网搜索的问题或关键词' : '输入问题，或添加栅格/图片文件；时序数据请按时间先后顺序上传'"
             rows="1"
             :disabled="isSending"
             @keydown.enter.exact.prevent="sendMessage"
           />
+          <div class="composer-options">
+            <button
+              class="web-search-toggle"
+              :class="{ active: forceWebSearch }"
+              type="button"
+              :aria-pressed="forceWebSearch"
+              :disabled="isSending"
+              title="开启后，本轮必须先联网搜索；搜索失败时不会生成结论"
+              @click="forceWebSearch = !forceWebSearch"
+            >
+              <span aria-hidden="true">🌐</span>
+              联网搜索
+            </button>
+            <span v-if="forceWebSearch" class="web-search-hint">发送后先搜索，再生成回答</span>
+          </div>
         </div>
 
-        <button class="send-button" type="submit" title="Send" :disabled="isSending">
+        <button class="send-button" type="submit" title="Send" :disabled="isSending || (forceWebSearch && !inputText.trim())">
           <Top />
         </button>
       </form>

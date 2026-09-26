@@ -64,6 +64,4 @@ Thumbs.db
 model/*
 docs/*
 test*.py
-!test_retrieval.py
-!test_web_search.py
-!test_review.py
+

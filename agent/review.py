@@ -177,6 +177,7 @@ def gather_review_evidence(
     for ref in web_refs[:10]:
         evidence.append({"id": f"web:{ref['source_id']}", "kind": "web",
                          "title": ref.get("title"), "url": ref.get("url"),
+                         "snippet": str(ref.get("snippet") or "")[:600],
                          "published_at": ref.get("published_at"),
                          "retrieved_at": ref.get("retrieved_at")})
     if LIVE_SEARCH_RE.search(question) and not web_refs:
@@ -218,7 +219,7 @@ def audit_evidence(evidence: list[dict]) -> list[dict]:
     for item in evidence[:40]:
         kind = item.get("kind")
         record = {key: item[key] for key in ("id", "kind", "name", "status", "title",
-                                               "url", "published_at", "retrieved_at",
+                                               "url", "snippet", "published_at", "retrieved_at",
                                                "size_bytes", "raster") if key in item}
         if kind == "tool":
             try:

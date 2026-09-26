@@ -174,6 +174,30 @@ def search_web(query: str, count: int = 5) -> dict:
     }
 
 
+def search_result_references(payload: dict) -> list[dict]:
+    """Create displayable references from one successful live search."""
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        return []
+    references = []
+    seen = set()
+    for item in payload.get("results", []):
+        url = _public_url(item.get("url")) if isinstance(item, dict) else None
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        references.append({
+            "source_type": "web",
+            "source_id": hashlib.sha256(url.encode()).hexdigest()[:24],
+            "title": _plain_text(item.get("title"), 200) or url,
+            "url": url,
+            "snippet": _plain_text(item.get("snippet")),
+            "provider": payload.get("provider"),
+            "published_at": item.get("published_at"),
+            "retrieved_at": payload.get("retrieved_at"),
+        })
+    return references
+
+
 def web_references(messages: list) -> list[dict]:
     """Extract cited search hits from successful web_search tool messages."""
     from langchain_core.messages import AIMessage, ToolMessage
@@ -195,22 +219,11 @@ def web_references(messages: list) -> list[dict]:
             if isinstance(payload, list):
                 payload = next((part.get("text") for part in payload if isinstance(part, dict) and part.get("type") == "text"), "")
             payload = json.loads(payload) if isinstance(payload, str) else payload
-            if not isinstance(payload, dict) or payload.get("success") is not True:
-                continue
-            for item in payload.get("results", []):
-                url = _public_url(item.get("url")) if isinstance(item, dict) else None
-                if not url or url in seen:
+            for reference in search_result_references(payload):
+                if reference["url"] in seen:
                     continue
-                seen.add(url)
-                references.append({
-                    "source_type": "web",
-                    "source_id": hashlib.sha256(url.encode()).hexdigest()[:24],
-                    "title": _plain_text(item.get("title"), 200) or url,
-                    "url": url,
-                    "provider": payload.get("provider"),
-                    "published_at": item.get("published_at"),
-                    "retrieved_at": payload.get("retrieved_at"),
-                })
+                seen.add(reference["url"])
+                references.append(reference)
         except (TypeError, ValueError):
             continue
     return references
