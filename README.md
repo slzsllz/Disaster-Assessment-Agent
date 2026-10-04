@@ -8,8 +8,9 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| `backend_api.py` | FastAPI 接口、对话执行、会话恢复和报告生成 |
+| `backend_api.py` | FastAPI 接口、共享的 `ChatTurnService` 对话流程、会话恢复和报告生成 |
 | `agent/` | 智能体工具、工具路由、错误反馈、数据库与产物存储 |
+| `tests/` | 对话流程和灾种审核规则的回归测试 |
 | `frontend/chatDisaster/` | Vue 3 + Vite 前端，包含聊天、历史会话、地图和报告预览 |
 | `migrations/` | PostgreSQL / PostGIS 数据库迁移 |
 | `model/` | 各分析工具使用的模型及权重；该目录内容不随 Git 提交 |
@@ -187,9 +188,8 @@ python scripts/migrate_legacy_artifacts.py --apply
 ## 验证与更多文档
 
 ```bash
-python -m unittest test_error_feedback test_tool_policy test_tool_router test_persistence test_retrieval test_web_search test_review
-RUN_DB_INTEGRATION=1 python -m unittest test_persistence.DatabaseIntegrationTests test_retrieval.RetrievalDatabaseTests
+python -m unittest discover -s tests -p 'test_*.py'
 cd frontend/chatDisaster && npm run build
 ```
 
-数据库集成测试需要可用的本地数据库。更多工具选择依据见 [Agent 工具接入筛选](docs/工具接入筛选.md)。当前接口按会话 ID 访问数据；如需向不受信任的用户开放服务，还应增加身份认证和会话权限控制。
+对话流程的扩展方式见 [后端对话执行架构](docs/后端执行架构.md)，工具选择依据见 [Agent 工具接入筛选](docs/工具接入筛选.md)。当前接口按会话 ID 访问数据；如需向不受信任的用户开放服务，还应增加身份认证和会话权限控制。

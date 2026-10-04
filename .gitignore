@@ -63,5 +63,6 @@ Thumbs.db
 # Model folder
 model/*
 docs/*
+!docs/后端执行架构.md
 test*.py
-
+!tests/test_*.py

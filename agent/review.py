@@ -6,7 +6,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -44,7 +44,7 @@ def _issue(code: str, severity: str, message: str, ids: list[str] | None = None)
             "evidence_ids": ids or []}
 
 
-def _metric_issues(name: str, data: dict, evidence_id: str, answer: str = "") -> list[dict]:
+def _common_metric_issues(name: str, data: dict, evidence_id: str) -> list[dict]:
     issues = []
     fields = ("total_valid_pixels", "flood_pixels", "building_total", "no_damage",
               "minor_damage", "major_damage", "destroyed", "damaged", "burned_pixels",
@@ -57,24 +57,50 @@ def _metric_issues(name: str, data: dict, evidence_id: str, answer: str = "") ->
         value = data.get(field)
         if isinstance(value, (int, float)) and (not math.isfinite(value) or not 0 <= value <= 1):
             issues.append(_issue("invalid_ratio", "critical", f"{name}.{field} 不在 0–1 范围", [evidence_id]))
-    if name == "assess_building_damage" and all(isinstance(data.get(k), int) for k in
-            ("building_total", "no_damage", "minor_damage", "major_damage", "destroyed", "damaged")):
-        classes = sum(data[k] for k in ("no_damage", "minor_damage", "major_damage", "destroyed"))
-        damaged = sum(data[k] for k in ("minor_damage", "major_damage", "destroyed"))
-        if data["building_total"] != classes or data["damaged"] != damaged:
-            issues.append(_issue("damage_count_mismatch", "critical", "建筑损毁像元分类统计不一致", [evidence_id]))
-        if data.get("count_unit") == "pixels":
-            building_claims = {int(number.replace(",", "")) for number in
-                               re.findall(r"(?<!\d)(\d[\d,]*)\s*栋", answer)}
-            pixel_counts = {data[key] for key in ("building_total", "no_damage", "minor_damage",
-                                                  "major_damage", "destroyed", "damaged")}
-            if building_claims & pixel_counts:
-                issues.append(_issue("pixel_count_as_buildings", "critical",
-                                     "像元统计被表述为建筑物栋数", [evidence_id]))
-    if name == "extract_flood_inundation" and all(isinstance(data.get(k), int) for k in
-            ("total_valid_pixels", "flood_pixels")):
+    return issues
+
+
+def _damage_metric_issues(data: dict, evidence_id: str, answer: str) -> list[dict]:
+    fields = ("building_total", "no_damage", "minor_damage", "major_damage",
+              "destroyed", "damaged")
+    if not all(isinstance(data.get(field), int) for field in fields):
+        return []
+    issues = []
+    classes = sum(data[field] for field in ("no_damage", "minor_damage", "major_damage", "destroyed"))
+    damaged = sum(data[field] for field in ("minor_damage", "major_damage", "destroyed"))
+    if data["building_total"] != classes or data["damaged"] != damaged:
+        issues.append(_issue("damage_count_mismatch", "critical", "建筑损毁像元分类统计不一致", [evidence_id]))
+    if data.get("count_unit") == "pixels":
+        building_claims = {int(number.replace(",", "")) for number in
+                           re.findall(r"(?<!\d)(\d[\d,]*)\s*栋", answer)}
+        pixel_counts = {data[field] for field in fields}
+        if building_claims & pixel_counts:
+            issues.append(_issue("pixel_count_as_buildings", "critical",
+                                 "像元统计被表述为建筑物栋数", [evidence_id]))
+    return issues
+
+
+def _flood_metric_issues(data: dict, evidence_id: str, answer: str) -> list[dict]:
+    if all(isinstance(data.get(field), int) for field in
+           ("total_valid_pixels", "flood_pixels")):
         if data["flood_pixels"] > data["total_valid_pixels"]:
-            issues.append(_issue("flood_count_mismatch", "critical", "洪水像元数超过有效像元数", [evidence_id]))
+            return [_issue("flood_count_mismatch", "critical",
+                           "洪水像元数超过有效像元数", [evidence_id])]
+    return []
+
+
+# Each tool contributes only its domain-specific checks; shared numeric checks run first.
+TOOL_METRIC_VALIDATORS: dict[str, Callable[[dict, str, str], list[dict]]] = {
+    "assess_building_damage": _damage_metric_issues,
+    "extract_flood_inundation": _flood_metric_issues,
+}
+
+
+def _metric_issues(name: str, data: dict, evidence_id: str, answer: str = "") -> list[dict]:
+    issues = _common_metric_issues(name, data, evidence_id)
+    validator = TOOL_METRIC_VALIDATORS.get(name)
+    if validator is not None:
+        issues.extend(validator(data, evidence_id, answer))
     return issues
 
 

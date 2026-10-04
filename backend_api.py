@@ -28,7 +28,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 from dotenv import load_dotenv
@@ -2371,6 +2371,190 @@ def get_file(file_id: str) -> FileResponse:
     return FileResponse(path)
 
 
+@dataclass
+class TurnOutcome:
+    """Result shared by the HTTP and SSE response adapters."""
+
+    payload: dict[str, Any]
+    report_answer: str
+    message_id: int | None
+    image_paths: list[str]
+    review_status: str
+
+
+class ChatTurnService:
+    """Own one chat turn's lifecycle, independent of its response transport."""
+
+    def __init__(
+        self, session: ChatSession, message: str, system_prompt: str,
+        recursion_limit: int, max_execution_time: int,
+        show_trace: bool, required_web_search: bool,
+    ) -> None:
+        self.session = session
+        self.message = message
+        self.system_prompt = system_prompt
+        self.show_trace = show_trace
+        self.required_web_search = required_web_search
+        self.agent_config = {
+            "recursion_limit": recursion_limit,
+            "max_execution_time": max_execution_time,
+        }
+        self.turn_id: str | None = None
+        self.uploaded_paths: list[str] = []
+        self.attachments: list[dict] = []
+        self.effective_prompt = ""
+        self.references: list[dict] = []
+        self.required_search_trace: dict | None = None
+        self.started_at: float | None = None
+        self.closed = False
+
+    def start(self, files: list[UploadFile] | None) -> None:
+        self.turn_id, self.uploaded_paths, self.attachments, _ = start_chat_turn(
+            self.session, self.message, self.system_prompt, files
+        )
+        if self.session.handle is None:
+            self.session.handle = AgentHandle(
+                MODEL_CONFIG, self.session.temp_dir, session_id=self.session.session_id
+            )
+        data_roots = [
+            str(BENCHMARK_DATA_DIR), str(self.session.uploads_dir), str(self.session.output_dir)
+        ]
+        self.effective_prompt = build_system_prompt(self.system_prompt, data_roots)
+
+    def prepare(self) -> list[Any]:
+        """Resolve references and prepare the same model input for both APIs."""
+        self.started_at = time.time()
+        context, self.references = retrieve_turn_context(
+            self.session, self.message, self.attachments
+        )
+        if self.required_web_search:
+            web_context, web_refs, self.required_search_trace = run_required_web_search(
+                self.message
+            )
+            context = "\n\n".join(filter(None, (context, web_context)))
+            extend_unique_references(self.references, web_refs)
+        return build_messages(self.session.messages, self.effective_prompt, context)
+
+    def finalize(self, response: dict, fallback_answer: str = "") -> TurnOutcome:
+        """Review and persist an Agent response exactly once."""
+        if self.turn_id is None or self.session.handle is None or self.started_at is None:
+            raise RuntimeError("Chat turn has not been prepared")
+        if self.closed:
+            raise RuntimeError("Chat turn has already ended")
+        raw_answer = last_ai_message(response)
+        if (not raw_answer or raw_answer == "(no assistant message)") and fallback_answer:
+            raw_answer = fallback_answer
+        trace = tool_trace(response)
+        if self.required_search_trace:
+            trace.insert(0, self.required_search_trace)
+        output_paths, artifact_records = persist_output_artifacts(
+            self.session, extract_tool_output_files(response)
+        )
+        extend_unique_references(
+            self.references, web_references(response.get("messages", []))
+        )
+        final_answer, images, output_files, review = execute_review(
+            self.session.handle, self.message, response, raw_answer,
+            self.uploaded_paths, output_paths, self.references,
+            required_web_search=self.required_web_search,
+        )
+        elapsed = time.time() - self.started_at
+        display_answer = sanitize_display_answer(final_answer)
+        accepted = review["status"] in {"passed", "revised"}
+        geometry = extract_first_output_geometry(output_paths) if accepted else None
+        legend = extract_tool_legend(response) if images else []
+        if accepted:
+            save_tool_assessments(
+                response, self.session.session_id, self.turn_id, artifact_records
+            )
+
+        def attachment_records(paths: list[str]) -> list[dict[str, str]]:
+            return [
+                {"name": artifact_records[path]["original_name"],
+                 "artifact_id": artifact_records[path]["id"]}
+                for path in paths
+            ]
+
+        message_id = db.complete_turn(
+            self.session.session_id, self.turn_id, final_answer, display_answer,
+            attachment_records(output_files), attachment_records(images), trace, elapsed,
+            legend, self.references, review,
+        )
+        self.closed = True
+        self.session.messages.append({"role": "assistant", "content": final_answer})
+        payload = {
+            "turn_id": self.turn_id,
+            "answer": display_answer or "(empty response)",
+            "elapsed": elapsed,
+            "tool_calls": len(trace),
+            "images": [artifact_payload(artifact_records[path]) for path in images],
+            "files": [artifact_payload(artifact_records[path]) for path in output_files],
+            "geometry": geometry,
+            "legend": legend,
+            "trace": trace if self.show_trace else [],
+            "references": self.references,
+            "review": review,
+        }
+        return TurnOutcome(
+            payload=payload,
+            report_answer=display_answer or final_answer or raw_answer,
+            message_id=message_id,
+            image_paths=list(images),
+            review_status=review["status"],
+        )
+
+    def generate_report(self, outcome: TurnOutcome) -> dict | None:
+        if (not should_generate_report(self.message)
+                or outcome.review_status in {"blocked", "unavailable"}):
+            return None
+        try:
+            images = [
+                {"name": Path(path).name, "data": Path(path).read_bytes()}
+                for path in outcome.image_paths if Path(path).exists()
+            ]
+            return generate_and_store_pdf_report(
+                outcome.report_answer, self.message, self.session.session_id,
+                message_id=outcome.message_id, images=images,
+            )
+        except Exception:
+            logger.exception("Report generation failed for turn %s", self.turn_id)
+            return None
+
+    def error_response(self, exc: Exception) -> dict[str, Any]:
+        error_text = "".join(traceback.format_exception(exc))
+        matches = ERROR_MEMORY.lookup_all(error_text)
+        public_error = (str(exc) if isinstance(exc, RequiredWebSearchError)
+                        else "任务执行或结果保存失败，请重试。")
+        if not self.closed and self.turn_id:
+            if db.fail_turn(self.session.session_id, self.turn_id, public_error):
+                self.session.messages.append({"role": "assistant", "content": public_error})
+            self.closed = True
+        return {
+            "turn_id": self.turn_id,
+            "answer": public_error,
+            "elapsed": 0,
+            "tool_calls": 0,
+            "images": [],
+            "files": [],
+            "geometry": None,
+            "legend": [],
+            "trace": [],
+            "error": public_error,
+            "memory_suggestions": [
+                {"pattern": pattern, "fix": fix} for pattern, fix in matches
+            ],
+        }
+
+    def cancel_if_unfinished(self) -> None:
+        if not self.closed and self.turn_id:
+            cancelled = "请求中断，任务未完成。"
+            if db.fail_turn(
+                self.session.session_id, self.turn_id, cancelled, code="cancelled"
+            ):
+                self.session.messages.append({"role": "assistant", "content": cancelled})
+            self.closed = True
+
+
 @app.post("/api/chat")
 def chat(
     session_id: str = Form(...),
@@ -2383,123 +2567,58 @@ def chat(
     files: list[UploadFile] | None = File(default=None),
 ) -> dict[str, Any]:
     session = get_session(session_id)
-    turn_id: str | None = None
+    turn = ChatTurnService(
+        session, message, system_prompt, recursion_limit, max_execution_time,
+        show_trace, required_web_search,
+    )
     with session.lock:
         try:
-            turn_id, uploaded_paths, current_attachments, _ = start_chat_turn(
-                session, message, system_prompt, files
-            )
-
-            if session.handle is None:
-                session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir, session_id=session.session_id)
-
-            data_roots = [str(BENCHMARK_DATA_DIR), str(session.uploads_dir), str(session.output_dir)]
-            effective_prompt = build_system_prompt(system_prompt, data_roots)
-            started = time.time()
-            retrieval_context, retrieval_refs = retrieve_turn_context(
-                session, message, current_attachments
-            )
-            required_search_trace = None
-            if required_web_search:
-                web_context, web_refs, required_search_trace = run_required_web_search(message)
-                retrieval_context = "\n\n".join(filter(None, (retrieval_context, web_context)))
-                extend_unique_references(retrieval_refs, web_refs)
-            lc_messages = build_messages(session.messages, effective_prompt, retrieval_context)
-
-            response = session.handle.invoke(
-                lc_messages,
-                config={
-                    "recursion_limit": recursion_limit,
-                    "max_execution_time": max_execution_time,
-                },
-            )
-            elapsed = time.time() - started
-            raw_answer = last_ai_message(response)
-            trace = tool_trace(response)
-            if required_search_trace:
-                trace.insert(0, required_search_trace)
-            output_paths, artifact_records = persist_output_artifacts(
-                session, extract_tool_output_files(response)
-            )
-            extend_unique_references(retrieval_refs, web_references(response.get("messages", [])))
-            final_answer, images, output_files, review = execute_review(
-                session.handle, message, response, raw_answer,
-                uploaded_paths, output_paths, retrieval_refs,
-                required_web_search=required_web_search,
-            )
-            elapsed = time.time() - started
-            display_answer = sanitize_display_answer(final_answer)
-            geometry = (extract_first_output_geometry(output_paths)
-                        if review["status"] in {"passed", "revised"} else None)
-            legend = extract_tool_legend(response) if images else []
-
-            if review["status"] in {"passed", "revised"}:
-                save_tool_assessments(response, session.session_id, turn_id, artifact_records)
-            _msg_id = db.complete_turn(
-                session.session_id, turn_id,
-                final_answer, display_answer,
-                [{"name": artifact_records[p]["original_name"],
-                  "artifact_id": artifact_records[p]["id"]} for p in output_files],
-                [{"name": artifact_records[p]["original_name"],
-                  "artifact_id": artifact_records[p]["id"]} for p in images],
-                trace, elapsed, legend, retrieval_refs, review,
-            )
-            session.messages.append(
-                {"role": "assistant", "content": final_answer}
-            )
-
-            # 生成 PDF 报告（仅在用户明确要求时生成）
-            report = None
-            if should_generate_report(message) and review["status"] not in {"blocked", "unavailable"}:
-                try:
-                    report_images = [
-                        {"name": Path(p).name, "data": Path(p).read_bytes()}
-                        for p in images if Path(p).exists()
-                    ]
-                    report = generate_and_store_pdf_report(
-                        display_answer or final_answer or raw_answer,
-                        message, session.session_id, message_id=_msg_id,
-                        images=report_images,
-                    )
-                except Exception:
-                    report = None
-
-            return {
-                "turn_id": turn_id,
-                "answer": display_answer or "(empty response)",
-                "elapsed": elapsed,
-                "tool_calls": len(trace),
-                "images": [artifact_payload(artifact_records[p]) for p in images],
-                "files": [artifact_payload(artifact_records[p]) for p in output_files],
-                "geometry": geometry,
-                "legend": legend,
-                "trace": trace if show_trace else [],
-                "references": retrieval_refs,
-                "review": review,
-                "report": report,
-            }
+            turn.start(files)
+            response = session.handle.invoke(turn.prepare(), config=turn.agent_config)
+            outcome = turn.finalize(response)
+            return {**outcome.payload, "report": turn.generate_report(outcome)}
         except Exception as exc:  # noqa: BLE001
-            error_text = "".join(traceback.format_exception(exc))
-            matches = ERROR_MEMORY.lookup_all(error_text)
-            public_error = (str(exc) if isinstance(exc, RequiredWebSearchError)
-                            else "任务执行或结果保存失败，请重试。")
-            if turn_id and db.fail_turn(session.session_id, turn_id, public_error):
-                session.messages.append({"role": "assistant", "content": public_error})
-            return {
-                "turn_id": turn_id,
-                "answer": public_error,
-                "elapsed": 0,
-                "tool_calls": 0,
-                "images": [],
-                "files": [],
-                "geometry": None,
-                "legend": [],
-                "trace": [],
-                "error": public_error,
-                "memory_suggestions": [
-                    {"pattern": pattern, "fix": fix} for pattern, fix in matches
-                ],
-            }
+            return turn.error_response(exc)
+
+
+def iter_chat_events(turn: ChatTurnService) -> Iterator[str]:
+    """SSE adapter for a prepared turn; the service owns all business state."""
+    session = turn.session
+    streamed_text = ""
+    outcome: TurnOutcome | None = None
+    try:
+        status = (
+            "正在检索参考资料并联网搜索..."
+            if turn.required_web_search else "正在检索参考资料..."
+        )
+        yield sse_event("status", {"message": status, "turn_id": turn.turn_id})
+        messages = turn.prepare()
+        yield sse_event("status", {"message": "正在思考...", "turn_id": turn.turn_id})
+        for item in session.handle.stream(messages, config=turn.agent_config):
+            if item["type"] == "delta":
+                text = item["text"]
+                streamed_text += text
+                yield sse_event("delta", {"text": text})
+            elif item["type"] == "status":
+                yield sse_event("status", {"message": item["message"]})
+            elif item["type"] == "error":
+                raise item["error"]
+            elif item["type"] == "final":
+                yield sse_event("status", {"message": "正在审核结果..."})
+                outcome = turn.finalize(item["response"], fallback_answer=streamed_text)
+                yield sse_event("done", outcome.payload)
+
+        if (outcome and should_generate_report(turn.message)
+                and outcome.review_status not in {"blocked", "unavailable"}):
+            yield sse_event("status", {"message": "正在生成报告..."})
+            report = turn.generate_report(outcome)
+            if report:
+                yield sse_event("report", report)
+    except Exception as exc:  # noqa: BLE001
+        yield sse_event("error", turn.error_response(exc))
+    finally:
+        turn.cancel_if_unfinished()
+        session.lock.release()
 
 
 @app.post("/api/chat/stream")
@@ -2514,171 +2633,21 @@ def chat_stream(
     files: list[UploadFile] | None = File(default=None),
 ) -> StreamingResponse:
     session = get_session(session_id)
+    turn = ChatTurnService(
+        session, message, system_prompt, recursion_limit, max_execution_time,
+        show_trace, required_web_search,
+    )
     session.lock.acquire()
-    turn_id: str | None = None
     try:
-        turn_id, uploaded_paths, current_attachments, _ = start_chat_turn(
-            session, message, system_prompt, files
-        )
-
-        if session.handle is None:
-            session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir, session_id=session.session_id)
-
-        data_roots = [str(BENCHMARK_DATA_DIR), str(session.uploads_dir), str(session.output_dir)]
-        effective_prompt = build_system_prompt(system_prompt, data_roots)
+        turn.start(files)
     except Exception:
-        if turn_id and db.fail_turn(session.session_id, turn_id, "任务初始化失败，请重试。"):
+        if turn.turn_id and db.fail_turn(session.session_id, turn.turn_id, "任务初始化失败，请重试。"):
             session.messages.append({"role": "assistant", "content": "任务初始化失败，请重试。"})
         session.lock.release()
         raise
 
-    def generate():
-        started = time.time()
-        streamed_text = ""
-        # 保存 final 块的上下文，用于 for 循环结束后生成 PDF 报告
-        _final_answer_text = ""
-        _final_msg_id: int | None = None
-        _final_user_question = message
-        _final_image_paths: list[str] = []
-        turn_completed = False
-        try:
-            yield sse_event("status", {"message": "正在检索参考资料...", "turn_id": turn_id})
-            retrieval_context, retrieval_refs = retrieve_turn_context(
-                session, message, current_attachments
-            )
-            required_search_trace = None
-            if required_web_search:
-                yield sse_event("status", {"message": "正在联网搜索..."})
-                web_context, web_refs, required_search_trace = run_required_web_search(message)
-                retrieval_context = "\n\n".join(filter(None, (retrieval_context, web_context)))
-                extend_unique_references(retrieval_refs, web_refs)
-            lc_messages = build_messages(session.messages, effective_prompt, retrieval_context)
-            yield sse_event("status", {"message": "正在思考...", "turn_id": turn_id})
-            for item in session.handle.stream(
-                lc_messages,
-                config={
-                    "recursion_limit": recursion_limit,
-                    "max_execution_time": max_execution_time,
-                },
-            ):
-                if item["type"] == "delta":
-                    text = item["text"]
-                    streamed_text += text
-                    yield sse_event("delta", {"text": text})
-                elif item["type"] == "status":
-                    yield sse_event("status", {"message": item["message"]})
-                elif item["type"] == "error":
-                    raise item["error"]
-                elif item["type"] == "final":
-                    elapsed = time.time() - started
-                    response = item["response"]
-                    raw_answer = last_ai_message(response)
-                    trace = tool_trace(response)
-                    if required_search_trace:
-                        trace.insert(0, required_search_trace)
-                    output_paths, artifact_records = persist_output_artifacts(
-                        session, extract_tool_output_files(response)
-                    )
-                    extend_unique_references(retrieval_refs, web_references(response.get("messages", [])))
-                    yield sse_event("status", {"message": "正在审核结果..."})
-                    final_answer, images, output_files, review = execute_review(
-                        session.handle, message, response, raw_answer or streamed_text,
-                        uploaded_paths, output_paths, retrieval_refs,
-                        required_web_search=required_web_search,
-                    )
-                    elapsed = time.time() - started
-                    display_answer = sanitize_display_answer(final_answer)
-                    geometry = (extract_first_output_geometry(output_paths)
-                                if review["status"] in {"passed", "revised"} else None)
-                    legend = extract_tool_legend(response) if images else []
-
-                    if review["status"] in {"passed", "revised"}:
-                        save_tool_assessments(response, session.session_id, turn_id, artifact_records)
-                    _final_msg_id = db.complete_turn(
-                        session.session_id, turn_id,
-                        final_answer,
-                        display_answer,
-                        [{"name": artifact_records[p]["original_name"],
-                          "artifact_id": artifact_records[p]["id"]} for p in output_files],
-                        [{"name": artifact_records[p]["original_name"],
-                          "artifact_id": artifact_records[p]["id"]} for p in images],
-                        trace, elapsed, legend, retrieval_refs, review,
-                    )
-                    turn_completed = True
-                    session.messages.append(
-                        {"role": "assistant", "content": final_answer}
-                    )
-                    _final_answer_text = display_answer if review["status"] not in {"blocked", "unavailable"} else ""
-                    _final_image_paths = list(images)
-
-                    yield sse_event(
-                        "done",
-                        {
-                            "turn_id": turn_id,
-                            "answer": display_answer or "(empty response)",
-                            "elapsed": elapsed,
-                            "tool_calls": len(trace),
-                            "images": [artifact_payload(artifact_records[p]) for p in images],
-                            "files": [artifact_payload(artifact_records[p]) for p in output_files],
-                            "geometry": geometry,
-                            "legend": legend,
-                            "trace": trace if show_trace else [],
-                            "references": retrieval_refs,
-                            "review": review,
-                        },
-                    )
-
-            # 对话结束后生成 PDF 报告（仅在用户明确要求时生成）
-            if _final_answer_text and should_generate_report(_final_user_question):
-                yield sse_event("status", {"message": "正在生成报告..."})
-                try:
-                    report_images = [
-                        {"name": Path(p).name, "data": Path(p).read_bytes()}
-                        for p in _final_image_paths if Path(p).exists()
-                    ]
-                    report = generate_and_store_pdf_report(
-                        _final_answer_text, _final_user_question,
-                        session.session_id, message_id=_final_msg_id,
-                        images=report_images,
-                    )
-                except Exception:
-                    report = None
-                if report:
-                    yield sse_event("report", report)
-        except Exception as exc:  # noqa: BLE001
-            error_text = "".join(traceback.format_exception(exc))
-            matches = ERROR_MEMORY.lookup_all(error_text)
-            public_error = (str(exc) if isinstance(exc, RequiredWebSearchError)
-                            else "任务执行或结果保存失败，请重试。")
-            if not turn_completed and turn_id and db.fail_turn(session.session_id, turn_id, public_error):
-                session.messages.append({"role": "assistant", "content": public_error})
-            yield sse_event(
-                "error",
-                {
-                    "turn_id": turn_id,
-                    "answer": public_error,
-                    "elapsed": 0,
-                    "tool_calls": 0,
-                    "images": [],
-                    "files": [],
-                    "geometry": None,
-                    "legend": [],
-                    "trace": [],
-                    "error": public_error,
-                    "memory_suggestions": [
-                        {"pattern": pattern, "fix": fix} for pattern, fix in matches
-                    ],
-                },
-            )
-        finally:
-            if not turn_completed and turn_id:
-                cancelled = "请求中断，任务未完成。"
-                if db.fail_turn(session.session_id, turn_id, cancelled, code="cancelled"):
-                    session.messages.append({"role": "assistant", "content": cancelled})
-            session.lock.release()
-
     return StreamingResponse(
-        generate(),
+        iter_chat_events(turn),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
