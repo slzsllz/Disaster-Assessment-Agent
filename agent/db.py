@@ -171,6 +171,124 @@ class Database:
         if not self._ensure_pool():
             raise DatabaseUnavailable("Persistent database is unavailable")
 
+    @contextmanager
+    def _auth_conn(self):
+        """Authentication and ownership checks must fail closed on DB errors."""
+        self.require_available()
+        try:
+            with self._conn() as conn:
+                yield conn
+        except DatabaseUnavailable:
+            raise
+        except Exception as exc:
+            logger.exception("Authentication database operation failed")
+            raise DatabaseUnavailable("Authentication database is unavailable") from exc
+
+    def create_user(self, username: str, display_name: str, password_hash: str) -> Optional[dict]:
+        with self._auth_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """INSERT INTO users(username, display_name, password_hash)
+                   VALUES (%s, %s, %s) ON CONFLICT (username) DO NOTHING RETURNING *""",
+                (username, display_name, password_hash),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return row
+
+    def get_user_by_username(self, username: str) -> Optional[dict]:
+        with self._auth_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM users WHERE username = %s", (username,))
+            return cur.fetchone()
+
+    def create_auth_session(self, user_id: str, password_hash: str,
+                            token_hash: str, expires_at) -> bool:
+        with self._auth_conn() as conn, conn.cursor() as cur:
+            # Serialize issuance with password changes; an old password cannot
+            # create a usable session after another request changes it.
+            cur.execute(
+                "SELECT id FROM users WHERE id = %s AND password_hash = %s AND is_active FOR UPDATE",
+                (user_id, password_hash),
+            )
+            if cur.fetchone() is None:
+                return False
+            cur.execute("DELETE FROM auth_sessions WHERE expires_at <= now()")
+            cur.execute(
+                "INSERT INTO auth_sessions(token_hash, user_id, expires_at) VALUES (%s, %s, %s)",
+                (token_hash, user_id, expires_at),
+            )
+            conn.commit()
+            return True
+
+    def get_authenticated_user(self, token_hash: str) -> Optional[dict]:
+        with self._auth_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT u.* FROM users u JOIN auth_sessions a ON a.user_id = u.id
+                   WHERE a.token_hash = %s AND a.expires_at > now() AND u.is_active""",
+                (token_hash,),
+            )
+            return cur.fetchone()
+
+    def revoke_auth_session(self, token_hash: str) -> None:
+        with self._auth_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM auth_sessions WHERE token_hash = %s", (token_hash,))
+            conn.commit()
+
+    def update_user_profile(self, user_id: str, display_name: str) -> dict:
+        with self._auth_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "UPDATE users SET display_name = %s, updated_at = now() WHERE id = %s RETURNING *",
+                (display_name, user_id),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return row
+
+    def change_user_password(self, user_id: str, old_hash: str, new_hash: str) -> bool:
+        with self._auth_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """UPDATE users SET password_hash = %s, updated_at = now()
+                   WHERE id = %s AND password_hash = %s AND is_active RETURNING id""",
+                (new_hash, user_id, old_hash),
+            )
+            if cur.fetchone() is None:
+                return False
+            cur.execute("DELETE FROM auth_sessions WHERE user_id = %s", (user_id,))
+            conn.commit()
+            return True
+
+    def consume_auth_attempt(self, key: str, limit: int, window_seconds: int) -> bool:
+        with self._auth_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM auth_rate_limits WHERE expires_at <= now()")
+            cur.execute(
+                """INSERT INTO auth_rate_limits(key, attempts, expires_at)
+                   VALUES (%s, 1, now() + %s * interval '1 second')
+                   ON CONFLICT (key) DO UPDATE SET attempts = auth_rate_limits.attempts + 1
+                   RETURNING attempts""",
+                (key, window_seconds),
+            )
+            allowed = cur.fetchone()[0] <= limit
+            conn.commit()
+            return allowed
+
+    def reset_auth_attempts(self, key: str) -> None:
+        with self._auth_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM auth_rate_limits WHERE key = %s", (key,))
+            conn.commit()
+
+    def session_belongs_to_user(self, session_id: str, user_id: str,
+                                create: bool = False) -> bool:
+        with self._auth_conn() as conn, conn.cursor() as cur:
+            if create:
+                cur.execute(
+                    """INSERT INTO sessions(id, user_id) VALUES (%s, %s)
+                       ON CONFLICT (id) DO NOTHING""",
+                    (session_id, user_id),
+                )
+            cur.execute("SELECT 1 FROM sessions WHERE id = %s AND user_id = %s", (session_id, user_id))
+            owned = cur.fetchone() is not None
+            conn.commit()
+            return owned
+
     # ==================================================================
     # 1. Sessions
     # ==================================================================
@@ -270,7 +388,7 @@ class Database:
             logger.warning("get_session failed: %s", exc)
             return None
 
-    def list_recent_sessions(self, limit: int = 20) -> List[dict]:
+    def list_recent_sessions(self, limit: int = 20, user_id: str = None) -> List[dict]:
         if not self._ensure_pool():
             return []
         try:
@@ -282,8 +400,9 @@ class Database:
                                WHERE session_id = s.id AND role = 'user'
                                ORDER BY created_at ASC LIMIT 1) AS first_message
                        FROM sessions s
+                       WHERE (%s::uuid IS NULL OR s.user_id = %s::uuid)
                        ORDER BY s.updated_at DESC LIMIT %s""",
-                    (limit,),
+                    (user_id, user_id, max(1, min(limit, 100))),
                 )
                 return cur.fetchall()
         except Exception as exc:  # noqa: BLE001
@@ -761,6 +880,7 @@ class Database:
         task: str = None,
         session_id: str = None,
         limit: int = 50,
+        user_id: str = None,
     ) -> List[dict]:
         """查询评估结果"""
         if not self._ensure_pool():
@@ -774,8 +894,11 @@ class Database:
             if session_id:
                 conditions.append("session_id = %s")
                 params.append(session_id)
+            if user_id:
+                conditions.append("session_id IN (SELECT id FROM sessions WHERE user_id = %s)")
+                params.append(user_id)
             where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-            params.append(limit)
+            params.append(max(1, min(limit, 100)))
             with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     f"""SELECT id, session_id, task, description, raster_path,

@@ -10,7 +10,7 @@
 | --- | --- |
 | `backend_api.py` | FastAPI 接口、共享的 `ChatTurnService` 对话流程、会话恢复和报告生成 |
 | `agent/` | 智能体工具、工具路由、错误反馈、数据库与产物存储 |
-| `tests/` | 对话流程和灾种审核规则的回归测试 |
+| `tests/` | 认证、数据权限、对话流程和灾种审核规则的回归测试 |
 | `frontend/chatDisaster/` | Vue 3 + Vite 前端，包含聊天、历史会话、地图和报告预览 |
 | `migrations/` | PostgreSQL / PostGIS 数据库迁移 |
 | `model/` | 各分析工具使用的模型及权重；该目录内容不随 Git 提交 |
@@ -149,7 +149,23 @@ python -c "from agent.web_search import search_web; print(search_web('地震 灾
 
 ## 使用方式
 
-在页面上传遥感影像或相关数据，描述要识别的灾害和希望得到的结果。涉及灾前灾后对比时，注明各文件的时间和角色。执行完成后，页面会展示结论和可用的结果文件；开启轨迹显示后还能查看工具调用过程。具有地理范围的评估可在地图中查看。需要 PDF 时，在消息中明确提出“生成报告”。
+首次打开页面时先注册账号。用户名为 3–32 位字母、数字、下划线、点或短横线，以字母或数字开头，不区分大小写；密码为 12–128 个字符，支持中文和空格；昵称可选。注册成功后自动登录。刷新页面会恢复登录，侧栏显示账号，点击账号可修改昵称和密码，点击“退出”结束当前设备的登录。修改密码后所有设备都需要重新登录。
+
+登录后在页面上传遥感影像或相关数据，描述要识别的灾害和希望得到的结果。涉及灾前灾后对比时，注明各文件的时间和角色。执行完成后，页面会展示结论和可用的结果文件；开启轨迹显示后还能查看工具调用过程。具有地理范围的评估可在地图中查看。需要 PDF 时，在消息中明确提出“生成报告”。每个账号只可访问自己的聊天、评估结果、上传文件和报告。
+
+### 账号与登录配置
+
+账号保存在 PostgreSQL 的 `users` 表，密码使用带独立随机盐的 scrypt（`N=32768, r=8, p=3`）哈希，参数采用 [OWASP 密码存储指南](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) 中的一组配置。登录使用 HttpOnly、SameSite=Lax Cookie，数据库仅保存登录令牌的 SHA-256 摘要，退出和修改密码会撤销对应令牌。浏览器无需在 localStorage 中保存令牌；图片和 PDF 链接沿用 Cookie 认证。默认登录有效期为 7 天。
+
+本地 Vite 开发无需额外配置。部署时通过同一域名代理前端与 `/api`，在根目录 `.env` 配置实际前端来源；HTTPS 部署还应开启 Secure Cookie（来源必须含协议和实际端口）：
+
+```dotenv
+AUTH_ALLOWED_ORIGINS=https://your-app.example.com
+AUTH_COOKIE_SECURE=true
+AUTH_SESSION_HOURS=168
+```
+
+后端会拒绝来源不受信任的浏览器写请求。登录限制为每个用户名 15 分钟内最多 10 次尝试、每个客户端 IP 15 分钟内最多 60 次请求；成功登录清除该用户名的尝试计数。注册限制为每个 IP 每小时 10 次，密码修改限制为每个用户 15 分钟内 10 次，超限返回 `429`。计数保存在数据库，多个进程共享。反向代理部署时，按实际代理地址配置 uvicorn 的 `--forwarded-allow-ips`，使客户端 IP 和 HTTPS 协议信息正确传入。当前支持用户名和密码认证；邮箱验证、短信登录与忘记密码找回需要另外接入相应服务。
 
 ### 结果审核
 
@@ -164,17 +180,34 @@ python -c "from agent.web_search import search_web; print(search_web('地震 灾
 | 接口 | 作用 |
 | --- | --- |
 | `GET /api/health` | 服务、数据库及启用工具状态 |
+| `POST /api/auth/register` | 注册并登录；JSON：`username`、`password`、可选 `display_name` |
+| `POST /api/auth/login` | 登录；JSON：`username`、`password` |
+| `GET /api/auth/me` | 当前登录账号 |
+| `PATCH /api/auth/me` | 修改昵称；JSON：`display_name` |
+| `POST /api/auth/password` | 修改密码并撤销所有登录；JSON：`current_password`、`new_password` |
+| `POST /api/auth/logout` | 退出当前设备 |
 | `POST /api/chat/stream` | 流式对话；使用 `multipart/form-data`，包含 UUID 格式的 `session_id`、`message` 和可选的 `files` |
 | `POST /api/chat` | 非流式对话，字段同上 |
-| `GET /api/sessions` | 最近会话 |
+| `GET /api/sessions` | 当前用户的最近会话 |
 | `GET /api/sessions/{session_id}/messages` | 会话消息 |
 | `GET /api/sessions/{session_id}/turns` | 各轮的 `running`、`completed` 或 `failed` 状态 |
 | `GET /api/sessions/{session_id}/assessments` | 评估结果及产物链接 |
 | `GET /api/files/{file_id}` | 下载或预览产物 |
 
+除健康检查、注册和登录外，业务数据接口需要登录 Cookie。无登录或已过期返回 `401`，访问不属于自己的会话或文件返回 `404`。用 curl 调试时，在登录请求中用 `-c cookies.txt` 保存 Cookie，并在后续请求中用 `-b cookies.txt` 携带 Cookie。
+
 ## 数据与迁移
 
 会话、消息、轮次状态、评估结果和产物元数据保存在 PostgreSQL；上传文件与生成文件保存在 `data/artifacts/`。部署时需要同时持久化数据库卷和该文件目录。后端可从数据库恢复历史会话；失败轮次会记录失败状态。实现细节见 [数据库与产物持久化](docs/数据库持久化.md)。
+
+重启后端会自动应用 `005_auth.sql`，增加账号、登录令牌、限流表和会话所有者字段。旧匿名会话会保留，但不会出现在任何新账号下。管理员确认旧记录归属后，可先预览，再分配给已注册的账号；`--session-id` 可重复指定，省略时选取全部未分配的旧会话：
+
+```bash
+python scripts/assign_legacy_sessions.py --username your-account --session-id UUID
+python scripts/assign_legacy_sessions.py --username your-account --session-id UUID --apply
+```
+
+这个操作只设置原会话的所有者，其消息、文件、报告和评估结果会一起变为该用户可访问，不会改动已有所有者的会话。
 
 已有旧数据需要迁移文件引用时，先预览，再执行：
 
@@ -189,7 +222,8 @@ python scripts/migrate_legacy_artifacts.py --apply
 
 ```bash
 python -m unittest discover -s tests -p 'test_*.py'
+AUTH_TEST_DATABASE=1 python -m unittest discover -s tests -p 'test_auth_database.py' -v
 cd frontend/chatDisaster && npm run build
 ```
 
-对话流程的扩展方式见 [后端对话执行架构](docs/后端执行架构.md)，工具选择依据见 [Agent 工具接入筛选](docs/工具接入筛选.md)。当前接口按会话 ID 访问数据；如需向不受信任的用户开放服务，还应增加身份认证和会话权限控制。
+数据库认证测试会创建临时独立 schema，验证迁移、账号唯一性、令牌失效、密码变更、限流和用户隔离，完成后清理；默认测试不需要连接数据库。对话流程的扩展方式见 [后端对话执行架构](docs/后端执行架构.md)，工具选择依据见 [Agent 工具接入筛选](docs/工具接入筛选.md)。

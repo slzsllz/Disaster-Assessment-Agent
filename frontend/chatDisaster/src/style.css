@@ -36,6 +36,77 @@ button {
   overflow: hidden;
 }
 
+.auth-loading {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: #667085;
+}
+
+.auth-page {
+  height: 100%;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 440px);
+  align-items: center;
+  gap: clamp(2rem, 7vw, 7rem);
+  padding: clamp(1.5rem, 5vw, 5rem) max(1.5rem, calc((100vw - 1120px) / 2));
+  background: radial-gradient(ellipse at 12% 25%, #e1f2ed 0, transparent 58%), #f6f8fa;
+}
+
+.auth-intro { max-width: 540px; }
+.auth-logo { display: block; width: 180px; height: auto; margin-bottom: 3rem; }
+.auth-eyebrow { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.16em; color: #417e6b; }
+.auth-intro h1 { font-size: clamp(2rem, 3.5vw, 3rem); margin: 1rem 0; letter-spacing: -0.04em; }
+.auth-intro p { color: #586473; line-height: 1.9; font-size: 1rem; }
+.auth-features { display: flex; gap: 0.7rem; flex-wrap: wrap; margin-top: 2rem; }
+.auth-features span { padding: 0.45rem 0.85rem; border: 1px solid #c5ddd4; border-radius: 999px; color: #417463; font-size: 0.8rem; }
+.auth-card { width: 100%; background: #fff; padding: 2rem; border: 1px solid #e5e9ee; border-radius: 20px; box-shadow: 0 16px 64px #1d413810; }
+.auth-card h2 { font-size: 1.5rem; margin: 1.5rem 0 0.5rem; }
+.auth-subtitle { color: #667085; font-size: 0.85rem; line-height: 1.7; margin-bottom: 1.5rem; }
+.auth-tabs { display: flex; background: #f1f4f5; border-radius: 10px; padding: 4px; }
+.auth-tabs button { flex: 1; border: 0; border-radius: 7px; padding: 0.65rem; background: transparent; color: #667085; }
+.auth-tabs button.active { background: #fff; color: #186c52; font-weight: 700; box-shadow: 0 2px 6px #0000000c; }
+.account-form fieldset { display: flex; flex-direction: column; gap: 0.6rem; border: 0; padding: 0; margin: 0; min-width: 0; }
+.account-form label { font-size: 0.85rem; font-weight: 600; margin-top: 0.45rem; }
+.account-form input { min-width: 0; width: 100%; border: 1px solid #d7dde4; border-radius: 8px; padding: 0.75rem 0.85rem; background: #fff; color: #202123; outline: none; }
+.account-form input:focus { border-color: #30876b; box-shadow: 0 0 0 3px #30876b18; }
+.account-form legend { font-weight: 700; font-size: 0.95rem; margin-bottom: 0.6rem; }
+.field-hint, .field-optional { color: #77818e; font-weight: 400; font-size: 0.75rem; line-height: 1.6; margin: 0; }
+.password-input { display: flex; align-items: center; position: relative; }
+.password-input input { padding-right: 3.4rem; }
+.password-input button { position: absolute; right: 0.6rem; padding: 0.25rem; border: 0; background: transparent; color: #667085; font-size: 0.75rem; }
+.account-primary { margin-top: 0.75rem; border: 0; border-radius: 8px; padding: 0.8rem 1rem; background: #207b5e; color: white; font-weight: 600; }
+.account-primary:hover { background: #176449; }
+.account-form :disabled, .auth-tabs :disabled, .account-logout:disabled { cursor: wait; opacity: 0.65; }
+.form-error { margin: 0.3rem 0; color: #b42318; background: #fff0ee; padding: 0.7rem 0.85rem; border-radius: 8px; font-size: 0.85rem; line-height: 1.6; }
+.auth-notice { color: #19694f; background: #eaf7f1; padding: 0.7rem 0.85rem; border-radius: 8px; font-size: 0.85rem; line-height: 1.6; }
+.connection-banner { position: fixed; left: 50%; transform: translateX(-50%); top: 0.6rem; z-index: 1000; max-width: calc(100% - 2rem); display: flex; align-items: center; gap: 1rem; padding: 0.75rem 1rem; background: #fff3df; border: 1px solid #f1d4a0; border-radius: 10px; font-size: 0.85rem; }
+.connection-banner button { border: 0; background: transparent; color: #8a5710; white-space: nowrap; }
+.account-bar { display: flex; align-items: center; gap: 0.75rem; padding: 0.8rem 0; margin-bottom: 0.75rem; border-bottom: 1px solid #e2e5e9; }
+.account-summary { display: flex; align-items: center; gap: 0.7rem; min-width: 0; flex: 1; text-align: left; border: 0; background: transparent; padding: 0; color: inherit; }
+.account-avatar { display: grid; place-items: center; flex: 0 0 36px; height: 36px; background: #deeee7; color: #207b5e; border-radius: 50%; font-weight: 700; }
+.account-summary > span:last-child { display: flex; flex-direction: column; min-width: 0; gap: 0.15rem; }
+.account-summary strong { font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-summary small { color: #77818e; font-size: 0.72rem; overflow: hidden; text-overflow: ellipsis; }
+.account-logout { border: 1px solid #d7dde4; border-radius: 7px; padding: 0.4rem 0.6rem; background: #fff; color: #667085; font-size: 0.75rem; }
+.account-dialog { width: min(460px, calc(100vw - 2rem)); max-height: calc(100dvh - 3rem); overflow: auto; border: 1px solid #e5e9ee; border-radius: 16px; padding: 1.5rem; color: #202123; box-shadow: 0 24px 80px #00000026; }
+.account-dialog::backdrop { background: #20212366; }
+.account-dialog-header { display: flex; align-items: center; justify-content: space-between; }
+.account-dialog-header h2 { margin: 0; font-size: 1.15rem; }
+.account-dialog-header button { background: transparent; border: 0; color: #667085; font-size: 1.5rem; }
+.account-username { color: #667085; font-size: 0.85rem; }
+.password-change-form { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid #e5e9ee; }
+
+@media (max-width: 760px) {
+  .auth-page { grid-template-columns: minmax(0, 440px); justify-content: center; gap: 1.5rem; padding: 1.5rem; align-content: start; }
+  .auth-logo { width: 135px; margin-bottom: 1.25rem; }
+  .auth-intro h1 { font-size: 1.8rem; margin: 0.75rem 0; }
+  .auth-intro p { font-size: 0.85rem; }
+  .auth-features { display: none; }
+  .auth-card { padding: 1.5rem; }
+}
+
 .app-shell {
   height: 100vh;
   height: 100dvh;

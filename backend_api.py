@@ -32,8 +32,9 @@ from typing import Any, Iterator
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -43,6 +44,8 @@ from agent.artifacts import ArtifactStore, artifact_payload
 from agent.tool_router import ToolRouter
 from agent.tool_policy import CURATED_TOOLS_BY_SERVER, CURATED_TOOL_NAMES, select_curated_tools
 from agent.db import DatabaseUnavailable, db
+from agent.auth import (allowed_origins, check_request_origin, require_session_owner,
+                        require_user, router as auth_router)
 from agent.retrieval import EXPLICIT_PRIOR_RE, RetrievalService, format_reference_context
 from agent.web_search import search_result_references, search_web, web_references
 from agent.review import (REVIEW_VERSION, audit_evidence, gather_review_evidence, parse_review_response,
@@ -1251,7 +1254,18 @@ class ChatSession:
         return self.temp_dir / "out"
 
 
-app = FastAPI(title="Disaster Detection Agent API")
+app = FastAPI(title="Disaster Detection Agent API", dependencies=[Depends(check_request_origin)])
+app.include_router(auth_router)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request, exc):
+    # Pydantic's default response can echo the entire body, including passwords.
+    if request.url.path.startswith("/api/auth/"):
+        return JSONResponse(status_code=422, content={"detail": "请求字段不完整或格式不正确。"},
+                            headers={"Cache-Control": "no-store"})
+    from fastapi.exception_handlers import request_validation_exception_handler
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.exception_handler(DatabaseUnavailable)
@@ -1268,7 +1282,7 @@ def apply_database_migrations() -> None:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1277,6 +1291,7 @@ app.add_middleware(
 MODEL_CONFIG = load_model_config()
 SESSIONS: dict[str, ChatSession] = {}
 FILES: dict[str, Path] = {}
+FILE_SESSIONS: dict[str, str] = {}
 SESSIONS_LOCK = threading.Lock()
 
 
@@ -1327,10 +1342,11 @@ def get_session(session_id: str) -> ChatSession:
         return session
 
 
-def file_payload(path: str) -> dict[str, str]:
+def file_payload(path: str, session_id: str) -> dict[str, str]:
     file_id = uuid.uuid4().hex
     file_path = Path(path)
     FILES[file_id] = file_path
+    FILE_SESSIONS[file_id] = str(session_id)
     return {"name": file_path.name, "url": f"/api/files/{file_id}"}
 
 
@@ -2065,7 +2081,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
     for img_file in image_files:
         if not isinstance(img_file, dict):
             continue
-        name = img_file.get("name", "image")
+        name = Path(str(img_file.get("name", "image")).replace("\\", "/")).name or "image"
         mime_type = img_file.get("mime_type", "image/png")
         data_b64 = img_file.get("data_base64")
         if data_b64:
@@ -2076,6 +2092,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
             temp_path = TEMP_BASE / f"{file_id}_{name}"
             temp_path.write_bytes(data)
             FILES[file_id] = temp_path
+            FILE_SESSIONS[file_id] = str(row["session_id"])
             images.append({"name": name, "url": f"/api/files/{file_id}"})
 
     # 如果二进制字段为空，回退到路径方式
@@ -2090,7 +2107,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
                 continue
             path = img.get("path")
             if path and Path(path).exists():
-                images.append(file_payload(path))
+                images.append(file_payload(path, row["session_id"]))
             elif img.get("url"):
                 images.append({"name": img.get("name", "image"), "url": img["url"]})
 
@@ -2100,7 +2117,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
     for att_file in attachment_files:
         if not isinstance(att_file, dict):
             continue
-        name = att_file.get("name", "file")
+        name = Path(str(att_file.get("name", "file")).replace("\\", "/")).name or "file"
         mime_type = att_file.get("mime_type", "application/octet-stream")
         data_b64 = att_file.get("data_base64")
         if data_b64:
@@ -2109,6 +2126,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
             temp_path = TEMP_BASE / f"{file_id}_{name}"
             temp_path.write_bytes(data)
             FILES[file_id] = temp_path
+            FILE_SESSIONS[file_id] = str(row["session_id"])
             attachments.append({
                 "name": name,
                 "url": f"/api/files/{file_id}",
@@ -2127,7 +2145,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
                 continue
             path = item.get("path")
             if path and Path(path).exists():
-                attachments.append(file_payload(path))
+                attachments.append(file_payload(path, row["session_id"]))
             elif item.get("url"):
                 attachments.append({"name": item.get("name", "file"), "url": item["url"]})
             else:
@@ -2139,7 +2157,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
     for rf in report_files:
         if not isinstance(rf, dict):
             continue
-        name = rf.get("name", "report.pdf")
+        name = Path(str(rf.get("name", "report.pdf")).replace("\\", "/")).name or "report.pdf"
         if rf.get("artifact_id"):
             record = db.get_artifact(rf["artifact_id"])
             if record:
@@ -2156,6 +2174,7 @@ def _serialize_message(row: dict) -> dict[str, Any]:
             temp_path = TEMP_BASE / f"{file_id}_{name}"
             temp_path.write_bytes(data)
             FILES[file_id] = temp_path
+            FILE_SESSIONS[file_id] = str(row["session_id"])
             report = {
                 "url": f"/api/files/{file_id}",
                 "name": name,
@@ -2218,7 +2237,7 @@ def _serialize_assessment(row: dict) -> dict[str, Any]:
             overlay_url = artifact_payload(record)["url"]
             break
     if overlay_url is None and overlay_path and Path(overlay_path).exists():
-        overlay_url = file_payload(overlay_path)["url"]
+        overlay_url = file_payload(overlay_path, row["session_id"])["url"]
     return {
         "id": row["id"],
         "session_id": str(row["session_id"]) if row.get("session_id") else None,
@@ -2250,38 +2269,42 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/api/sessions")
-def list_sessions(limit: int = 30) -> dict[str, Any]:
+def list_sessions(limit: int = 30, user: dict = Depends(require_user)) -> dict[str, Any]:
     """列出最近的会话 -- 前端历史侧栏的数据来源 (DB)"""
     db.require_available()
-    rows = db.list_recent_sessions(limit=limit)
+    rows = db.list_recent_sessions(limit=limit, user_id=str(user["id"]))
     return {"sessions": [_serialize_session(r) for r in rows]}
 
 
 @app.get("/api/sessions/{session_id}/messages")
-def get_session_messages(session_id: str) -> dict[str, Any]:
+def get_session_messages(session_id: str, user: dict = Depends(require_user)) -> dict[str, Any]:
     """加载某会话的全部消息 -- 切换历史会话时从 DB 读取"""
+    session_id = require_session_owner(session_id, user)
     db.require_available()
     rows = db.load_chat_messages_strict(session_id)
     return {"session_id": session_id, "messages": [_serialize_message(r) for r in rows]}
 
 
 @app.get("/api/sessions/{session_id}/turns")
-def get_session_turns(session_id: str) -> dict[str, Any]:
+def get_session_turns(session_id: str, user: dict = Depends(require_user)) -> dict[str, Any]:
     """Show persisted execution status for each agent turn."""
+    session_id = require_session_owner(session_id, user)
     return {"session_id": session_id, "turns": db.list_turns(session_id)}
 
 
 @app.get("/api/sessions/{session_id}/assessments")
-def get_session_assessments(session_id: str) -> dict[str, Any]:
+def get_session_assessments(session_id: str, user: dict = Depends(require_user)) -> dict[str, Any]:
     """某会话产生的评估结果 (模型输出)"""
+    session_id = require_session_owner(session_id, user)
     db.require_available()
     rows = db.query_assessments(session_id=session_id)
     return {"session_id": session_id, "assessments": [_serialize_assessment(r) for r in rows]}
 
 
 @app.get("/api/sessions/{session_id}/latest-geometry")
-def get_session_latest_geometry(session_id: str) -> dict[str, Any]:
+def get_session_latest_geometry(session_id: str, user: dict = Depends(require_user)) -> dict[str, Any]:
     """返回某会话最新的空间范围, 用于前端地图自动定位。"""
+    session_id = require_session_owner(session_id, user)
     row = db.latest_assessment_geometry(session_id)
     if row:
         assessment = _serialize_assessment(row)
@@ -2295,15 +2318,17 @@ def get_session_latest_geometry(session_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/assessments")
-def list_assessments(task: str = "", limit: int = 50) -> dict[str, Any]:
+def list_assessments(task: str = "", limit: int = 50,
+                     user: dict = Depends(require_user)) -> dict[str, Any]:
     """全局评估结果列表 (可按 task 过滤)"""
     db.require_available()
-    rows = db.query_assessments(task=task or None, limit=limit)
+    rows = db.query_assessments(task=task or None, limit=limit, user_id=str(user["id"]))
     return {"assessments": [_serialize_assessment(r) for r in rows]}
 
 
 @app.post("/api/sessions/{session_id}/clear")
-def clear_session(session_id: str) -> dict[str, bool]:
+def clear_session(session_id: str, user: dict = Depends(require_user)) -> dict[str, bool]:
+    session_id = require_session_owner(session_id, user)
     session = get_session(session_id)
     with session.lock:
         db.clear_session_data(session.session_id)
@@ -2318,12 +2343,9 @@ def clear_session(session_id: str) -> dict[str, bool]:
 
 
 @app.delete("/api/sessions/{session_id}")
-def delete_session(session_id: str) -> dict[str, bool]:
+def delete_session(session_id: str, user: dict = Depends(require_user)) -> dict[str, bool]:
     """删除整个会话及其所有消息"""
-    try:
-        session_id = str(uuid.UUID(session_id))
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid session ID") from None
+    session_id = require_session_owner(session_id, user)
     db.require_available()
     with SESSIONS_LOCK:
         session = SESSIONS.get(session_id)
@@ -2346,7 +2368,7 @@ def delete_session(session_id: str) -> dict[str, bool]:
 
 
 @app.get("/api/files/{file_id}")
-def get_file(file_id: str) -> FileResponse:
+def get_file(file_id: str, user: dict = Depends(require_user)) -> FileResponse:
     try:
         artifact_id = str(uuid.UUID(file_id))
     except ValueError:
@@ -2354,10 +2376,12 @@ def get_file(file_id: str) -> FileResponse:
     if artifact_id:
         record = db.get_artifact(artifact_id)
         if record:
+            require_session_owner(str(record["session_id"]), user)
             try:
                 return FileResponse(
                     ARTIFACT_STORE.resolve(record), media_type=record["mime_type"],
                     filename=record["original_name"],
+                    headers={"Cache-Control": "private, no-store"},
                     content_disposition_type=(
                         "inline" if record["mime_type"].startswith("image/")
                         or record["mime_type"] == "application/pdf" else "attachment"
@@ -2366,9 +2390,11 @@ def get_file(file_id: str) -> FileResponse:
             except FileNotFoundError:
                 raise HTTPException(status_code=404, detail="Artifact content missing") from None
     path = FILES.get(file_id)
-    if path is None or not path.exists():
+    owner_session = FILE_SESSIONS.get(file_id)
+    if path is None or not owner_session or not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path)
+    require_session_owner(owner_session, user)
+    return FileResponse(path, headers={"Cache-Control": "private, no-store"})
 
 
 @dataclass
@@ -2565,7 +2591,9 @@ def chat(
     show_trace: bool = Form(False),
     required_web_search: bool = Form(False),
     files: list[UploadFile] | None = File(default=None),
+    user: dict = Depends(require_user),
 ) -> dict[str, Any]:
+    session_id = require_session_owner(session_id, user, create=True)
     session = get_session(session_id)
     turn = ChatTurnService(
         session, message, system_prompt, recursion_limit, max_execution_time,
@@ -2631,7 +2659,9 @@ def chat_stream(
     show_trace: bool = Form(False),
     required_web_search: bool = Form(False),
     files: list[UploadFile] | None = File(default=None),
+    user: dict = Depends(require_user),
 ) -> StreamingResponse:
+    session_id = require_session_owner(session_id, user, create=True)
     session = get_session(session_id)
     turn = ChatTurnService(
         session, message, system_prompt, recursion_limit, max_execution_time,

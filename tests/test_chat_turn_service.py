@@ -12,6 +12,7 @@ import uuid
 from langchain_core.messages import AIMessage
 
 import backend_api as api
+import agent.auth as auth
 
 
 class FakeHandle:
@@ -50,6 +51,7 @@ class ChatTurnServiceTests(unittest.TestCase):
         self.db.complete_turn.return_value = 7
         self.db.fail_turn.return_value = True
         self.stack.enter_context(patch.object(api, "db", self.db))
+        self.stack.enter_context(patch.object(auth, "db", self.db))
         self.stack.enter_context(
             patch.object(api, "get_session", side_effect=lambda _id: self.session)
         )
@@ -80,6 +82,7 @@ class ChatTurnServiceTests(unittest.TestCase):
             system_prompt=api.DEFAULT_SYSTEM_PROMPT,
             recursion_limit=40, max_execution_time=600,
             show_trace=True, required_web_search=required_web_search, files=None,
+            user={"id": str(uuid.uuid4())},
         )
         if streaming:
             with patch.object(api, "StreamingResponse", side_effect=lambda body, **_: body):
