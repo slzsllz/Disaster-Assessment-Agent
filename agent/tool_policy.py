@@ -46,6 +46,8 @@ CURATED_TOOLS_BY_SERVER: dict[str, tuple[str, ...]] = {
         "calculate_band_mean_by_condition", "get_percentile_value_from_image",
     ),
     "WebSearch": ("web_search",),
+    "WebFetch": ("web_fetch",),
+    "DisasterFeed": ("disaster_feed",),
 }
 
 CURATED_TOOL_NAMES = frozenset(

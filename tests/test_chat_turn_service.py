@@ -4,15 +4,22 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import json
+import os
 from pathlib import Path
 import unittest
+import tempfile
 from unittest.mock import Mock, patch
 import uuid
 
 from langchain_core.messages import AIMessage
+from langchain_core.messages import ToolMessage
 
 import backend_api as api
 import agent.auth as auth
+from agent.artifacts import ArtifactStore
+from agent.web_fetch import fetch_web
+from agent.web_search import search_result_references
+from agent.disaster_feeds import query_disaster_feed
 
 
 class FakeHandle:
@@ -104,6 +111,39 @@ class ChatTurnServiceTests(unittest.TestCase):
         self.assertEqual(self.session.messages[-1],
                          {"role": "assistant", "content": "测试结果"})
 
+    def test_official_feed_citations_reach_review_without_creating_a_remote_sensing_assessment(self):
+        payload = {"type": "FeatureCollection", "features": [{
+            "id": "official-quake", "geometry": {"type": "Point", "coordinates": [104.65, 28.5, 5]},
+            "properties": {"time": 1791367200000, "mag": 3.0, "title": "Official earthquake",
+                           "url": "https://earthquake.usgs.gov/earthquakes/eventpage/official-quake"},
+        }]}
+        with patch("agent.disaster_feeds._get", return_value=json.dumps(payload).encode()):
+            result = query_disaster_feed("usgs", start_time="2026-10-07", end_time="2026-10-09")
+        self.session.handle.response = {"messages": [
+            AIMessage(content="", tool_calls=[{"name": "disaster_feed", "args": {"provider": "usgs"}, "id": "feed-1"}]),
+            ToolMessage(content=json.dumps(result), name="disaster_feed", tool_call_id="feed-1"),
+            AIMessage(content="官方地震记录：震级 3.0，深度 5 公里。"),
+        ]}
+
+        def review(handle, question, response, answer, uploaded, output_paths, references, **kwargs):
+            self.assertEqual(references[0]["structured_data"]["magnitude"], 3.0)
+            self.assertEqual(references[0]["evidence_type"], "official_record")
+            self.assertEqual(output_paths, [])
+            return answer, [], [], {"status": "passed", "issues": [], "evidence": [], "version": api.REVIEW_VERSION}
+
+        with patch.object(api, "execute_review", side_effect=review):
+            outcome = self.request(False, "查询 USGS 官方地震目录")
+        self.assertEqual(outcome["references"][0]["structured_data"]["depth_km"], 5)
+        self.db.save_assessment.assert_not_called()
+
+    def test_optional_feed_configuration_reaches_mcp_children(self):
+        with patch.dict(os.environ, {"FIRMS_MAP_KEY": "test-map-key", "CHINA_ALERTS_CAP_URL": "https://www.12379.cn/cap.xml",
+                                     "UNRELATED_TEST_SECRET": "must-not-inherit"}):
+            env = api.build_mcp_child_env(self.session.session_id)
+        self.assertEqual(env["FIRMS_MAP_KEY"], "test-map-key")
+        self.assertEqual(env["CHINA_ALERTS_CAP_URL"], "https://www.12379.cn/cap.xml")
+        self.assertNotIn("UNRELATED_TEST_SECRET", env)
+
     def test_blocked_review_cannot_save_assessment_or_report(self):
         with patch.object(
             api, "execute_review",
@@ -178,6 +218,50 @@ class ChatTurnServiceTests(unittest.TestCase):
 
         self.db.complete_turn.assert_not_called()
         self.assertEqual(self.db.fail_turn.call_count, 2)
+
+    def test_fetched_evidence_reuses_artifact_and_upgrades_citation_without_creating_assessment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.session.temp_dir = Path(directory) / "session"
+            store = ArtifactStore(Path(directory) / "artifacts", self.db)
+            saved = {}
+            self.db.save_artifact.side_effect = lambda record: saved.update({record["id"]: record})
+            self.db.get_artifact.side_effect = lambda artifact_id: saved.get(artifact_id)
+            url = "https://example.com/alert"
+
+            def get_page(_url, **kwargs):
+                kwargs["response_info"].update(url=url, content_type="text/html; charset=utf-8")
+                return b"<article>Public alert body with verified report data.</article>"
+
+            with patch("agent.web_fetch._get", side_effect=get_page):
+                fetched = fetch_web([url], output_dir=self.session.output_dir,
+                                    session_id=self.session.session_id, artifact_store=store)
+            path = fetched["results"][0]["output_path"]
+            artifact_id = fetched["results"][0]["artifact"]["id"]
+            self.session.handle.response = {"messages": [
+                AIMessage(content="", tool_calls=[{"name": "web_fetch", "args": {"urls": [url]},
+                                                   "id": "fetch-1", "type": "tool_call"}]),
+                ToolMessage(content=json.dumps(fetched), tool_call_id="fetch-1", name="web_fetch"),
+                AIMessage(content="已核实"),
+            ]}
+            search_refs = search_result_references({"success": True, "results": [{"url": url, "snippet": "thin snippet"}]})
+
+            def review(*args, **kwargs):
+                references = args[6]
+                self.assertTrue(references[0]["body_verified"])
+                self.assertIn("Public alert body", references[0]["body_excerpt"])
+                return "已核实", [], [path], {"status": "passed", "issues": []}
+
+            with patch.object(api, "ARTIFACT_STORE", store), patch.object(api, "execute_review", side_effect=review), patch.object(
+                api, "retrieve_turn_context", return_value=("", search_refs)
+            ):
+                result = self.request(False, "打开这个链接核实")
+
+            self.assertEqual(result["files"][0]["id"], artifact_id)
+            self.assertEqual(len(result["references"]), 1)
+            self.assertEqual(result["references"][0]["artifact_id"], artifact_id)
+            self.assertNotIn("body_excerpt", result["references"][0])
+            self.db.save_artifact.assert_called_once()
+            self.db.save_assessment.assert_not_called()
 
 
 if __name__ == "__main__":

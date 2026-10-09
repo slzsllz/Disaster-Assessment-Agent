@@ -1,5 +1,21 @@
 {
     "mcpServers": {
+        "DisasterFeed": {
+            "command": "python",
+            "args": [
+                "tools/DisasterFeed.py",
+                "--temp_dir",
+                "tmp/tmp/out"
+            ]
+        },
+        "WebFetch": {
+            "command": "python",
+            "args": [
+                "tools/WebFetch.py",
+                "--temp_dir",
+                "tmp/tmp/out"
+            ]
+        },
         "Analysis": {
             "command": "python",
             "args": [

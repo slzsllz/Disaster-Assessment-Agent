@@ -119,6 +119,14 @@ EMBED_MODEL_NAME=Qwen3-Embedding-4B
 
 `web_search` 已接入智能体。询问“今天的地震新闻”“搜索最新洪水预警”等实时问题时，路由会提供这个工具。搜索结果包含标题、摘要、原始链接、发布时间和检索时间；本轮链接会保存在会话历史中，并显示在回答下方。外部摘要仅作参考，重要灾情应打开来源核实。
 
+`web_fetch` 用于打开搜索结果或用户提供的链接，核实预警正文和灾情通报。例如：“打开这个链接核实：`https://…`”或“搜索最新洪水预警并核实正文”。工具接收按优先级排列的 `urls`，默认抓取前 3 个唯一链接，可通过 `count` 指定 1–5 个；最多传入 20 个候选 URL。支持静态 HTML 和纯文本，会优先提取 `<article>` / `<main>` 的内容，去掉脚本、样式和导航，识别 UTF-8 及常见中文编码。
+
+每篇完整提取的正文先保存为当前会话的 `web_evidence` artifact，再返回最多 1200 字符的摘要、原始/最终 URL、发布时间（页面明确提供时）、抓取时间、正文字符数和 SHA-256。JSON 存档包含完整提取文本和原始响应校验和；回答的来源旁会出现“正文存档”，使用与其他会话文件相同的权限控制。搜索引用在抓取后会升级为正文引用。正文属于不可信外部数据，不能作为模型指令执行。
+
+抓取复用搜索服务的 `WEB_SEARCH_TIMEOUT_SECONDS` 和 `WEB_SEARCH_PROXY`；每个响应最多 512 KiB（解压后也检查），最多跟随 3 次重定向。每一跳检查 URL 和全部 DNS 地址，拒绝本机、内网、链路本地地址及带凭据的 URL，并固定连接到已检查的公网 IP；HTTPS 仍校验原域名证书。原有私有 SearXNG 搜索服务配置不受此限制。[SSRF 防护参考](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)、[HTTPS 自定义 SNI 与主机名校验说明](https://urllib3.readthedocs.io/en/stable/advanced-usage.html#custom-sni-hostname)。
+
+各链接独立处理，部分失败会返回错误列表，不会把失败页面当作已核实的正文。PDF、需要登录、反爬拦截或仅靠 JavaScript 加载正文的页面当前不支持；正文为空、响应超限或无法持久化时返回失败，不绕过站点访问限制。
+
 输入框下方的“联网搜索”按钮可开启强制搜索模式。开启后输入问题并发送，后端会先执行联网搜索，再把搜索结果和来源交给智能体完成本轮任务；搜索失败或没有可用来源时，本轮会直接报错，不会生成未经联网核实的结论。按钮保持开启，直到再次点击关闭。直接调用 `POST /api/chat` 或 `POST /api/chat/stream` 时，可在表单中传入 `required_web_search=true` 使用相同模式；此模式需要提供非空的 `message`。
 
 未配置搜索服务时，默认使用 Google News RSS，**只能搜索新闻**，不代表全网网页。通用网页搜索可在根目录 `.env` 选择以下一种配置：
@@ -139,13 +147,45 @@ WEB_SEARCH_TIMEOUT_SECONDS=10
 # WEB_SEARCH_PROXY=socks5h://127.0.0.1:your-proxy-port
 ```
 
-也可以省略 `WEB_SEARCH_PROVIDER`：后端依次选用已配置的 Brave、SearXNG，否则使用新闻检索。若明确设置 `WEB_SEARCH_PROVIDER=news`，则始终使用免密钥新闻检索。修改 `.env` 后重启后端。SearXNG 的 `settings.yml` 须将 `json` 加入 `search.formats`；其 [搜索 API 文档](https://docs.searxng.org/dev/search_api.html) 和 [Brave Web Search API 文档](https://api-dashboard.search.brave.com/app/documentation/web-search) 提供服务端配置说明。若机器通过 SOCKS 代理访问外网，Python 环境还需要 `requests[socks]`。`WEB_SEARCH_PROXY` 只影响搜索请求；不设置时沿用进程的标准代理环境变量。
+也可以省略 `WEB_SEARCH_PROVIDER`：后端依次选用已配置的 Brave、SearXNG，否则使用新闻检索。若明确设置 `WEB_SEARCH_PROVIDER=news`，则始终使用免密钥新闻检索。修改 `.env` 后重启后端。SearXNG 的 `settings.yml` 须将 `json` 加入 `search.formats`；其 [搜索 API 文档](https://docs.searxng.org/dev/search_api.html) 和 [Brave Web Search API 文档](https://api-dashboard.search.brave.com/app/documentation/web-search) 提供服务端配置说明。若机器通过 SOCKS 代理访问外网，Python 环境还需要 `requests[socks]`。`WEB_SEARCH_PROXY` 影响搜索与正文抓取请求；不设置时沿用进程的标准代理环境变量。
 
 可先在项目根目录验证搜索工具：
 
 ```bash
 python -c "from agent.web_search import search_web; print(search_web('地震 灾害', 3))"
 ```
+
+### 官方结构化灾情源
+
+`disaster_feed` 优先查询官方记录，再与相同 AOI、时间窗的建筑损毁、洪水淹没、火烧迹地评估互证。服务实现位于 `agent/disaster_feeds.py`，MCP 入口为 `agent/tools/DisasterFeed.py`，已加入工具白名单、配置和路由。返回兼容 `search_web` 的 `{success, provider, retrieved_at, results[]}`；每条结果保留 `title/url/snippet/source/published_at`，另提供 `event_id` 和结构化 `data`。事件或卫星观测时间位于 `data.event_time`，不冒充网页发布时间。
+
+| provider | 数据与查询能力 | 访问条件及覆盖限制 |
+| --- | --- | --- |
+| `usgs` | FDSN GeoJSON 地震；震级、震级类型、深度 km、经纬度、事件和更新时间；服务端 bbox / 时间 / 最小震级查询 | 免密钥；[官方 FDSN 文档](https://earthquake.usgs.gov/fdsnws/event/1/) |
+| `gdacs` | 全球地震、洪水、野火、气旋、火山、干旱；保留原始预警等级和严重性单位；时间查询、分页后按代表点过滤 bbox | 免密钥；最多扫描 5 页、每页 100 条，并报告扫描限制；代表点不等于受灾范围；[官方 API 文档](https://www.gdacs.org/gdacsapi/swagger/index.html) |
+| `firms` | VIIRS S-NPP 热异常；观测时间 UTC、经纬度、FRP MW、原始置信度；本地 bbox / 时间过滤 | 免密钥使用官网当前 Collection 2 全球 24h CSV 快照；下载及更新可能延迟，报告实际观测时间范围；可配置 `FIRMS_MAP_KEY` 使用 Area API，每次最多 10 个日历日；[公开下载说明](https://firms.modaps.eosdis.nasa.gov/content/active_fire/)、[Area API](https://firms.modaps.eosdis.nasa.gov/api/area/) |
+| `cenc` | 中国地震台网官网当前地震目录 JSON；震级、深度 km、经纬度、位置；北京时间转换 UTC，再按 bbox / 时间 / 最小震级过滤 | 免密钥，使用改版后 [官网数据](https://www.ceic.ac.cn/data/data.json)；这是当前目录快照，不保证任意历史窗口完整 |
+| `china_alerts` | 配置的官方 CAP 1.2 预警；发送、有效及失效时间、发布者、原始严重性和更新/撤销类型；忽略演练和非公开消息 | 需要可访问的官方 `CHINA_ALERTS_CAP_URL`；目前未确认可用的免密钥公共入口，未配置时明确失败；只接受 `12379.cn`、`cma.gov.cn`、`nmc.cn` 官方域名；不把行政区或 CAP 多边形猜成点，暂不支持 bbox 过滤；[CAP 标准](https://docs.oasis-open.org/emergency/cap/v1.2/CAP-v1.2-os.html) |
+
+参数：`bbox=[west,south,east,north]`，WGS84 经纬度；`start_time/end_time` 使用 ISO 8601，无时区时按 UTC；`count=1..20`，默认 10；时间窗默认最近 7 天，FIRMS 默认最近 24 小时，上限 366 天。`event_type` 为 `earthquake/flood/wildfire/cyclone/volcano/drought`，`min_magnitude` 只适用于 USGS/CENC。USGS、GDACS、CENC 和免密钥 FIRMS 支持跨日期变更线的 bbox；带密钥 FIRMS Area API 需要拆成两次查询。
+
+例如：“查询中国地震台网最近一周在 `[100,20,110,35]` 的 M≥3 地震，与上传的建筑损毁影像互证”，或直接调用：
+
+```python
+from agent.disaster_feeds import query_disaster_feed
+
+result = query_disaster_feed(
+    "usgs", bbox=[100, 20, 110, 35],
+    start_time="2026-10-01T00:00:00Z", end_time="2026-10-08T00:00:00Z",
+    min_magnitude=3, count=10,
+)
+```
+
+所有请求复用搜索服务的超时与代理设置。搜索、网页正文仍保持原有 512 KiB 响应限制；FIRMS 官方 CSV 单独允许最多 32 MiB，解析后仅保留有限结果。可在 `.env` 设置可选的 `FIRMS_MAP_KEY`、`CHINA_ALERTS_CAP_URL` 并重启后端；接口异常不返回带密钥的请求 URL。FIRMS/CENC 的引用使用公开数据地址和记录 ID 片段，避免不同记录在引用去重时合并。
+
+`coverage/warnings/truncated` 明确说明快照、扫描、异常记录与结果条数限制。空列表表示未找到匹配记录，不能推断“没有灾害”；网络、格式或配置错误返回 `success=false`，不会改用新闻伪装官方记录。FIRMS 热异常不等于已确认野火或过火面积，GDACS 模型预警不等于实测损失，地震震级不等于建筑损毁。正文和官方记录都属于不可信外部数据，不是指令。
+
+来源引用复用 `search_result_references`，在 `web_references` 中注册 `disaster_feed` 并附带结构化字段。审核可读取官方数值、覆盖限制和时间；普通预警事实可由结构化记录支持，而“打开链接核实正文”仍要求 P0 正文存档。官方源查询不会自动存成遥感损毁评估。
 
 ## 使用方式
 
@@ -172,6 +212,8 @@ AUTH_SESSION_HOURS=168
 有工具调用、文件或实时搜索的轮次会进入结果审核。后端先检查工具是否成功、关键像元统计是否一致、产物是否存在且可读取，以及实时问题是否有联网来源；严重错误会阻止发布评估结论。随后模型根据工具结果、来源链接、文件元数据和小尺寸图片预览返回结构化审核意见，可标记 `passed`（通过）、`revised`（依据证据修订）或 `blocked`（证据不足或存在严重问题）。模型审核异常时标记 `unavailable`，并明确展示未经审核的草稿。普通闲聊标记 `skipped`。
 
 审核状态、问题和精简证据快照保存在每轮消息中，轮次记录保存审核状态，重新打开历史会话仍可查看。流式生成中的文字会标记为“草稿 · 待审核”，最终 `done` 事件给出审核后的文本。只有审核通过或完成修订的评估结果才写入 `assessment_results`；审核阻断或不可用时不会生成 PDF 报告。审核仍依赖模型判断复杂语义；`passed` 不等于现场核验或人工审批。
+
+联网审核区分搜索摘要和已存档正文。后端核对正文 artifact 的会话归属、来源和校验和，并给审核模型提供有长度限制的正文片段，优先保留与问题相关的后续段落。要求打开链接核实、查看正文，或询问实时预警/灾情通报时，只有搜索摘要会触发 `web_body_missing` 阻断；抓取了其他链接而没有抓取要求核实的链接，也会阻断。存档 ID、正文校验和及抓取时间会保留在审核证据中，便于回查。抓取和搜索工具提供的是来源证据，不作为灾害检测模型的评估结果入库。
 
 默认由主模型执行二次审核。如需使用独立的多模态审核模型，可在 `.env` 中配置 `REVIEW_MODEL_NAME`、`REVIEW_MODEL_URL` 和 `REVIEW_MODEL_API_KEY`；审核模型需要兼容 OpenAI Chat Completions 接口并支持图片输入。未设置这些变量时沿用主模型。
 

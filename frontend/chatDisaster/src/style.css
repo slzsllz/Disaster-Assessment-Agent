@@ -816,6 +816,12 @@ input[type="checkbox"] {
   color: #1768a6;
 }
 
+.retrieval-references .web-evidence-link {
+  color: #207b5e;
+  font-size: 0.72rem;
+  border-bottom: 1px dashed currentColor;
+}
+
 .retrieval-label {
   font-weight: 700;
 }

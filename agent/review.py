@@ -7,14 +7,16 @@ import math
 import re
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from langchain_core.messages import AIMessage, ToolMessage
 
 from agent.error_feedback import tool_error
-from agent.tool_router import LIVE_SEARCH_RE
+from agent.tool_router import LIVE_SEARCH_RE, WEB_FETCH_RE, requires_web_body
+from agent.web_search import WEB_SOURCE_TOOL_NAMES, _public_url
 
 
-REVIEW_VERSION = 1
+REVIEW_VERSION = 3
 MAX_EVIDENCE = 24
 MAX_ARTIFACTS = 20
 
@@ -165,15 +167,20 @@ def gather_review_evidence(
         data = _tool_payload(message.content)
         failed = bool(tool_error(message))
         last_result_by_name[name] = (evidence_id, failed)
-        if name == "web_search" and isinstance(data, dict) and data.get("success"):
+        if name in WEB_SOURCE_TOOL_NAMES and isinstance(data, dict) and data.get("success"):
             compact = dict(data)
             results = data.get("results") if isinstance(data.get("results"), list) else []
             compact["results"] = [
                 {key: (value[:300] if key == "snippet" and isinstance(value, str) else value)
-                 for key, value in item.items() if key in {"title", "url", "snippet", "published_at", "source"}}
+                 for key, value in item.items() if key in {"title", "url", "final_url", "snippet", "published_at",
+                                                          "retrieved_at", "source", "text_chars", "text_sha256", "event_id", "data"}}
                 for item in results[:5] if isinstance(item, dict)
             ]
-            rendered = _bounded(compact, 7000)
+            rendered = _bounded(compact, 3500 if name == "web_fetch" else 7000)
+            if name == "web_fetch" and data.get("errors"):
+                issues.append(_issue("web_fetch_partial", "warning", "部分网页正文未能抓取，不能视为已核实", [evidence_id]))
+            if name == "disaster_feed" and (data.get("warnings") or data.get("truncated")):
+                issues.append(_issue("official_feed_coverage", "warning", "官方数据源存在覆盖或条数限制，不能把查询结果当作完整灾情统计", [evidence_id]))
         else:
             rendered = _bounded(data)
         evidence.append({"id": evidence_id, "kind": "tool", "name": name,
@@ -205,9 +212,39 @@ def gather_review_evidence(
                          "title": ref.get("title"), "url": ref.get("url"),
                          "snippet": str(ref.get("snippet") or "")[:600],
                          "published_at": ref.get("published_at"),
-                         "retrieved_at": ref.get("retrieved_at")})
+                         "retrieved_at": ref.get("retrieved_at"),
+                         "evidence_type": "page_body" if ref.get("body_verified") else ref.get("evidence_type", "search_snippet"),
+                         "structured_data": ref.get("structured_data"),
+                         "coverage": ref.get("coverage"), "truncated": ref.get("truncated"),
+                         "body_verified": ref.get("body_verified", False),
+                         "artifact_id": ref.get("artifact_id"),
+                         "text_sha256": ref.get("text_sha256"), "text_chars": ref.get("text_chars"),
+                         "body_excerpt": str(ref.get("body_excerpt") or "")[:3000],
+                         "final_url": ref.get("final_url")})
     if LIVE_SEARCH_RE.search(question) and not web_refs:
         issues.append(_issue("live_source_missing", "critical", "实时问题没有可核验的联网来源"))
+    verified_bodies = [ref for ref in web_refs if (
+        ref.get("body_verified") and ref.get("artifact_id") and ref.get("body_excerpt")
+    )]
+    official_records = [ref for ref in web_refs if ref.get("evidence_type") == "official_record" and ref.get("structured_data")]
+    # Official API fields support alert/event facts without an HTML page body.
+    # Explicit requests to open/read a linked document retain the P0 body gate.
+    if requires_web_body(question) and not verified_bodies and (WEB_FETCH_RE.search(question) or not official_records):
+        issues.append(_issue("web_body_missing", "critical", "链接核实或预警通报缺少已抓取并保存的网页正文，搜索摘要不足以核实"))
+    elif verified_bodies:
+        def canonical_url(value):
+            url = _public_url(value)
+            if not url:
+                return None
+            parsed = urlsplit(url)
+            return urlunsplit((parsed.scheme, parsed.netloc.lower(), parsed.path or "/", parsed.query, ""))
+
+        requested = {canonical_url(url.rstrip(".,;!?)]}，。；！？"))
+                     for url in re.findall(r"https?://[^\s<>`\"'，。；！？]+", question)} - {None}
+        fetched = {canonical_url(ref.get(key)) for ref in verified_bodies
+                   for key in ("url", "final_url")} - {None}
+        if requested and not requested.intersection(fetched):
+            issues.append(_issue("requested_web_body_missing", "critical", "已抓取的正文不对应用户要求核实的链接"))
 
     for index, value in enumerate(output_paths[:MAX_ARTIFACTS]):
         path = Path(value)
@@ -246,17 +283,22 @@ def audit_evidence(evidence: list[dict]) -> list[dict]:
         kind = item.get("kind")
         record = {key: item[key] for key in ("id", "kind", "name", "status", "title",
                                                "url", "snippet", "published_at", "retrieved_at",
-                                               "size_bytes", "raster") if key in item}
+                                               "size_bytes", "raster", "final_url", "evidence_type",
+                                               "body_verified", "artifact_id", "text_sha256", "text_chars",
+                                               "structured_data", "coverage", "truncated") if key in item}
+        if kind == "web" and item.get("body_excerpt"):
+            record["body_excerpt"] = str(item["body_excerpt"])[:1200]
         if kind == "tool":
             try:
                 payload = json.loads(item.get("result", ""))
             except (TypeError, ValueError):
                 payload = None
             if isinstance(payload, dict):
-                if item.get("name") == "web_search":
+                if item.get("name") in WEB_SOURCE_TOOL_NAMES:
                     results = payload.get("results") if isinstance(payload.get("results"), list) else []
                     record["results"] = [{key: result[key] for key in
-                                          ("title", "url", "snippet", "published_at")
+                                          ("title", "url", "snippet", "published_at", "retrieved_at",
+                                           "final_url", "text_chars", "text_sha256", "event_id", "data")
                                           if key in result}
                                          for result in results[:5]
                                          if isinstance(result, dict)]

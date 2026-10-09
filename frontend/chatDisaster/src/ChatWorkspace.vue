@@ -1102,6 +1102,11 @@ onUnmounted(() => {
                   {{ reference.title }}
                 </a>
                 <span v-else>{{ reference.title }}（工具说明）</span>
+                <a v-if="reference.body_verified && reference.artifact_url" :href="reference.artifact_url"
+                  class="web-evidence-link" target="_blank" rel="noreferrer" download
+                  :title="`已保存 ${reference.text_chars} 字正文；抓取时间：${reference.retrieved_at}`">
+                  正文存档
+                </a>
               </template>
             </div>
             <div v-if="message.images?.length" class="result-images">
