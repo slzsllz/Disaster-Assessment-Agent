@@ -62,3 +62,15 @@ Thumbs.db
 # Model folder
 model/*
 data/
+# Track the UString inference integration; keep weights and generated artifacts local.
+!model/UString/
+model/UString/*
+!model/UString/infer.py
+!model/UString/video_features.py
+!model/UString/README.md
+!model/UString/LICENSE
+!model/UString/requirements.txt
+!model/UString/model/
+!model/UString/samples/
+model/UString/samples/*
+!model/UString/samples/README.md
