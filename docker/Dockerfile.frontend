@@ -1,0 +1,15 @@
+# Disaster-Assessment-Agent 前端服务镜像
+# 使用 Nginx 提供已构建的 Vue3 静态文件，并反向代理 /api 到后端
+
+FROM nginx:alpine
+
+# 1. 复制生产构建产物
+COPY frontend/chatDisaster/dist /usr/share/nginx/html
+
+# 2. 复制 Nginx 配置
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+
+# 3. 暴露前端端口
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
