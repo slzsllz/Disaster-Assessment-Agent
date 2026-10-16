@@ -565,3 +565,11 @@ MCP server `TrafficAccidentAnticipation`，函数 `anticipate_traffic_accident`�
 `allow_legacy_checkpoint=true`，返回 `status=experimental`，不可解释为可靠事故预测。
 正式使用需要完整权重和准确率验证。检测器 torchvision 移植尚未完成原版精度对比。
 详见 `model/UString/README.md`。
+
+## 网络搜索工具
+
+新增 MCP server `WebSearch`，函数 `search_web`，使用百度千帆网页搜索 API。
+支持 `query`、`top_k`（1–50）、`domains`（站点列表）、`recency`（week/month/semiyear/year）。
+返回标题、原网页链接、内容片段、日期和搜索汇总文件，可用于核对灾害报道及官方公告。
+搜索凭证从根目录 `.env` 的 `QIANFAN_WEB_SEARCH_API_KEY` 读取，不作为工具参数暴露。
+完整配置和调用示例见 [网络搜索说明](docs/WEB_SEARCH.md)。修改后重启后端并新建会话。

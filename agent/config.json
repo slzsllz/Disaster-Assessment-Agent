@@ -79,6 +79,14 @@
                 "--temp_dir",
                 "tmp/tmp/out"
             ]
+        },
+        "WebSearch": {
+            "command": "python",
+            "args": [
+                "tools/WebSearch.py",
+                "--temp_dir",
+                "tmp/tmp/out"
+            ]
         }
     },
     "models": [
