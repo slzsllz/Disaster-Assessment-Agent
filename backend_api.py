@@ -780,23 +780,11 @@ def load_model_config(config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     if not cfg.get("models"):
         raise RuntimeError(f"No models configured in {config_path}")
     model = cfg["models"][0]
-    api_key = substitute_env(model.get("api_key", "") or "")
-    base_url = substitute_env((model.get("client_args") or {}).get("base_url", "") or "")
-    qwen35_key = os.getenv("QWEN35_API_KEY")
-    if qwen35_key:
-        return {
-            "path": str(config_path),
-            "model_name": "qwen3.5-9b",
-            "api_key": qwen35_key,
-            "base_url": os.getenv("QWEN_SERVER_URL", "http://172.31.233.78:8001/v1"),
-            "generate_args": {},
-            "mcp_servers": cfg.get("mcpServers", {}),
-        }
     return {
         "path": str(config_path),
-        "model_name": model.get("model_name", "qwen3.7-plus"),
-        "api_key": api_key,
-        "base_url": base_url,
+        "model_name": substitute_env(model.get("model_name", "") or ""),
+        "api_key": substitute_env(model.get("api_key", "") or ""),
+        "base_url": substitute_env((model.get("client_args") or {}).get("base_url", "") or ""),
         "generate_args": model.get("generate_args", {}) or {},
         "mcp_servers": cfg.get("mcpServers", {}),
     }

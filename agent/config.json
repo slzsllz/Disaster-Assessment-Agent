@@ -75,12 +75,12 @@
     },
     "models": [
         {
-            "config_name": "gpt-5",
+            "config_name": "qwen3.8-27b-local",
             "model_type": "openai_chat",
-            "model_name": "gpt-5",
-            "api_key": "",
+            "model_name": "Qwen3.8-27B",
+            "api_key": "EMPTY",
             "client_args": {
-                "base_url": ""
+                "base_url": "http://127.0.0.1:8010/v1"
             },
             "generate_args": {}
         }
