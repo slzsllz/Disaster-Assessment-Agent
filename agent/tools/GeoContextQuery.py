@@ -115,14 +115,11 @@ def _read_env_file(path: Path) -> dict[str, str]:
 
 def _arcgis_token() -> str:
     root_env = _read_env_file(PROJECT_ROOT / ".env")
-    frontend_env = _read_env_file(PROJECT_ROOT / "frontend" / "chatDisaster" / ".env.local")
     return (
         os.getenv("ARCGIS_API_KEY")
         or os.getenv("VITE_ARCGIS_API_KEY")
         or root_env.get("ARCGIS_API_KEY")
         or root_env.get("VITE_ARCGIS_API_KEY")
-        or frontend_env.get("ARCGIS_API_KEY")
-        or frontend_env.get("VITE_ARCGIS_API_KEY")
         or ""
     )
 
@@ -395,7 +392,7 @@ def query_geo_context(
     if not token:
         raise RuntimeError(
             "ArcGIS API key is not configured. Set ARCGIS_API_KEY or VITE_ARCGIS_API_KEY "
-            "in the backend environment, .env, or frontend/chatDisaster/.env.local."
+            "in the environment or project-root .env file."
         )
 
     if raster_path and not bbox:

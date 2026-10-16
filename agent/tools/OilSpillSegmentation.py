@@ -30,7 +30,7 @@ Returns:
 
 Answer guidance:
 - Return all generated output paths in the tool result, but do not assume every output is useful to the user.
-- The second-pass multimodal reviewer will inspect the tool outputs and choose which images are useful for frontend display and which files are useful downloads.
+- A downstream reviewer may inspect the tool outputs and choose useful images and files for analysis.
 - The first-pass answer should focus on the oil-spill segmentation result, not on listing or explaining output files.
 - Do not repeat or list output file paths in the final natural-language answer.
 """
@@ -88,13 +88,6 @@ def extract_oil_spill_area(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
     result["summary_path"] = str(summary_path)
-
-    try:
-        from tools.utils import save_assessment_to_db
-
-        save_assessment_to_db("oil_spill", result, raster_path=image_path)
-    except Exception:
-        pass
 
     return result
 
