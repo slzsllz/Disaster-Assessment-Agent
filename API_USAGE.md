@@ -552,3 +552,24 @@ for img in result.get("images", []):
 3. **推理耗时**：灾害评估涉及深度学习推理，单次调用可能需要数十秒到数分钟，建议使用流式接口并设置合理超时。
 4. **生产部署**：建议在后端前增加 Nginx 反向代理，并配置 HTTPS、访问控制及文件大小限制。
 5. **数据持久化**：PostgreSQL 数据默认保存在 Docker 卷 `docker_pg_data` 中，请勿随意执行 `docker compose down -v`，否则会删除数据。
+
+## UString 交通事故预测工具
+
+MCP server `TrafficAccidentAnticipation`，函数 `anticipate_traffic_accident`。
+支持 `video_path`（行车记录仪视频）或 `features_path`（DAD/VGG16 NPZ），二选一。
+视频由已有的 Cascade R-CNN、VGG16、UString 权重完成推理；无需手工提取特征。
+`fps=20`、`start_time=0`、`max_frames=100`，只分析所选片段，不代表整段长视频。
+输出分数曲线、不确定性、CSV、PNG、summary.json，以及视频特征缓存和首帧区域预览。
+
+现有四份 UString 权重均缺少循环参数，默认明确报错。实验联调必须显式设置
+`allow_legacy_checkpoint=true`，返回 `status=experimental`，不可解释为可靠事故预测。
+正式使用需要完整权重和准确率验证。检测器 torchvision 移植尚未完成原版精度对比。
+详见 `model/UString/README.md`。
+
+## 网络搜索工具
+
+新增 MCP server `WebSearch`，函数 `search_web`，使用百度千帆网页搜索 API。
+支持 `query`、`top_k`（1–50）、`domains`（站点列表）、`recency`（week/month/semiyear/year）。
+返回标题、原网页链接、内容片段、日期和搜索汇总文件，可用于核对灾害报道及官方公告。
+搜索凭证从根目录 `.env` 的 `QIANFAN_WEB_SEARCH_API_KEY` 读取，不作为工具参数暴露。
+完整配置和调用示例见 [网络搜索说明](docs/WEB_SEARCH.md)。修改后重启后端并新建会话。
