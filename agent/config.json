@@ -16,14 +16,6 @@
                 "tmp/tmp/out"
             ]
         },
-        "Inversion": {
-            "command": "python",
-            "args": [
-                "tools/Inversion.py",
-                "--temp_dir",
-                "tmp/tmp/out"
-            ]
-        },
         "Perception": {
             "command": "python",
             "args": [
@@ -68,6 +60,14 @@
             "command": "python",
             "args": [
                 "tools/GeoAI.py",
+                "--temp_dir",
+                "tmp/tmp/out"
+            ]
+        },
+        "Statistics": {
+            "command": "python",
+            "args": [
+                "tools/Statistics.py",
                 "--temp_dir",
                 "tmp/tmp/out"
             ]
