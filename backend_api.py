@@ -23,6 +23,7 @@ import threading
 import time
 import traceback
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from agent.error_memory import ErrorMemory
 from agent.db import db
+from agent.news_monitor import DisasterNewsMonitor, create_news_router
 
 
 # ---------------------------------------------------------------------------
@@ -993,7 +995,19 @@ class ChatSession:
         return self.temp_dir / "out"
 
 
-app = FastAPI(title="Disaster Detection Agent API")
+NEWS_MONITOR = DisasterNewsMonitor()
+
+
+@asynccontextmanager
+async def app_lifespan(app: FastAPI):
+    try:
+        yield
+    finally:
+        await NEWS_MONITOR.close()
+
+
+app = FastAPI(title="Disaster Detection Agent API", lifespan=app_lifespan)
+app.include_router(create_news_router(NEWS_MONITOR))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],

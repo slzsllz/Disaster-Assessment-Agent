@@ -1240,3 +1240,12 @@ input[type="checkbox"] {
     width: calc(100vw - 1.5rem);
   }
 }
+
+/* Keep notification controls available when the chat title is long or on mobile. */
+.chat-header > div:first-child { min-width: 0; }
+.chat-header h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 768px) {
+  .chat-header { flex-wrap: wrap; padding-left: 3.4rem; }
+  .header-actions { flex-wrap: wrap; margin-left: auto; }
+  .header-status { display: none; }
+}

@@ -61,3 +61,30 @@ python -m unittest discover -s tests -p test_web_search.py -v
 ```
 
 离线测试覆盖请求结构、结果保存、空结果、错误处理、凭证脱敏、输入校验和 MCP 调用。
+
+## 灾情新闻通知
+
+前端右上角新增“灾情通知”开关，默认关闭。开启后立即检索一次，之后后端每 60 秒检索一次；
+页面每 10 秒获取新增消息及检索状态，不会每 10 秒调用搜索 API。
+同一个后端进程内所有已开启页面共享一轮搜索结果。
+
+通知弹窗展示近期灾情报道的标题、来源、发布时间、内容片段和原文链接，可关闭后点击消息数量重新查看。
+只接收有明确日期且在近 24 小时内的报道，按 URL 和标题去重，并排除标题中的演练、科普等内容。
+这属于关键词检索及规则筛选，可能漏掉缺少发布时间、未被搜索引擎收录的报道，也不等同于官方灾害预警。
+
+关闭开关立即取消当前页面订阅；最后一个订阅关闭时取消定时任务和正在执行的搜索。
+页面离开时发送解除订阅请求，断线或异常关闭的订阅在 180 秒无心跳后过期。
+其他页面仍开启时后端继续为这些页面检索。开关偏好和最近已通知的 ID 保存在浏览器本地。
+搜索失败时显示重试状态，下轮自动重试，不伪造新闻。服务关闭时取消后台任务。
+
+接口：
+
+- `POST /api/disaster-news/subscriptions`：`{"client_id":"页面随机 UUID","enabled":true或false}`。
+- `GET /api/disaster-news/updates?client_id=...&after_seq=0&epoch=...`：获取新增消息并续期订阅。
+
+结果包含 `subscribed/news/cursor/epoch/checking/last_checked_at/last_success_at/error`。
+`epoch` 用于识别服务重启，`cursor` 用于增量获取。当前为单后端进程内的共享状态，
+与项目现有 Docker `--workers 1` 配置匹配；多进程部署需要外部共享调度和消息存储。
+页面关闭后不会发送系统桌面通知。
+
+验证：`python -m unittest discover -s tests -p test_news_monitor.py -v`，以及前端 `npm run build`。
