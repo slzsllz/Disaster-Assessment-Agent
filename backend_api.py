@@ -34,8 +34,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from agent.error_memory import ErrorMemory
+from agent.error_memory import ErrorMemory, normalize_error, redact_secrets
 from agent.db import db
+from agent.tool_recovery import recovery_run, wrap_tool
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +95,7 @@ AGENT_DIR = PROJECT_ROOT / "agent"
 BENCHMARK_DATA_DIR = PROJECT_ROOT / "benchmark" / "data"
 TEMP_BASE = PROJECT_ROOT / "tmp" / "fastapi_out"
 TEMP_BASE.mkdir(parents=True, exist_ok=True)
-ERROR_MEMORY = ErrorMemory(AGENT_DIR / "error_memory.json")
+ERROR_MEMORY = ErrorMemory(AGENT_DIR / "error_memory.json", database=db)
 
 DEFAULT_CONFIG = AGENT_DIR / next(
     (
@@ -221,6 +222,32 @@ def sanitize_display_answer(text: str) -> str:
     cleaned = sanitize_local_paths(cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned
+
+
+def backend_error_payload(exc: Exception) -> dict[str, Any]:
+    error_text = "".join(traceback.format_exception(exc))
+    matches = ERROR_MEMORY.lookup_all(error_text)
+    suggestions = [
+        {"pattern": normalize_error(pattern), "fix": sanitize_display_answer(redact_secrets(fix))}
+        for pattern, fix in matches
+    ]
+    answer = f"后端调用失败：{normalize_error(str(exc))}"
+    if suggestions:
+        answer += "\n\n**错误经验建议**\n" + "\n".join(
+            f"- {item['fix']}" for item in suggestions
+        )
+    return {
+        "answer": answer,
+        "elapsed": 0,
+        "tool_calls": 0,
+        "images": [],
+        "files": [],
+        "geometry": None,
+        "legend": [],
+        "trace": [],
+        "error": error_text,
+        "memory_suggestions": suggestions,
+    }
 
 
 def extract_final_answer(text: str) -> str:
@@ -856,11 +883,18 @@ class AgentHandle:
             client = MultiServerMCPClient(
                 build_mcp_servers(config["mcp_servers"], temp_dir, session_id)
             )
-            tools = await client.get_tools()
+            tools = [wrap_tool(tool, ERROR_MEMORY) for tool in await client.get_tools()]
             agent = create_react_agent(llm, tools)
             return agent, llm, client, tools
 
-        self.agent, self.llm, self.client, self.tools = self.run(setup())
+        try:
+            self.agent, self.llm, self.client, self.tools = self.run(setup())
+        except BaseException:
+            self.loop.call_soon_threadsafe(self.loop.stop)
+            self.thread.join(timeout=5)
+            if not self.thread.is_alive():
+                self.loop.close()
+            raise
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self.loop)
@@ -873,7 +907,8 @@ class AgentHandle:
 
     def invoke(self, messages: list, config: dict | None = None) -> dict:
         async def run_agent():
-            return await self.agent.ainvoke({"messages": messages}, config=config or {})
+            with recovery_run():
+                return await self.agent.ainvoke({"messages": messages}, config=config or {})
 
         return self.run(run_agent())
 
@@ -916,6 +951,10 @@ class AgentHandle:
         sentinel = object()
 
         async def run_agent():
+            with recovery_run():
+                await stream_agent()
+
+        async def stream_agent():
             final_response: dict[str, Any] | None = None
             try:
                 async for event in self.agent.astream_events(
@@ -937,6 +976,22 @@ class AgentHandle:
                                 "message": f"Calling tool: {event.get('name', 'tool')}",
                             }
                         )
+                    elif event_name == "on_tool_end":
+                        result = data.get("output")
+                        if isinstance(result, ToolMessage) and result.status == "error":
+                            try:
+                                recovery = json.loads(result.content).get("error_recovery", {})
+                            except (TypeError, ValueError):
+                                recovery = {}
+                            if recovery:
+                                remaining = recovery["remaining_attempts"]
+                                output_queue.put({
+                                    "type": "status",
+                                    "message": (
+                                        f"工具调用失败，正在检查错误经验（剩余尝试 {remaining} 次）"
+                                        if remaining else "工具重试次数已用完，正在整理失败原因"
+                                    ),
+                                })
                     elif event_name == "on_chain_end":
                         output = data.get("output")
                         if isinstance(output, dict) and "messages" in output:
@@ -2011,22 +2066,7 @@ def chat(
                 "report": report,
             }
         except Exception as exc:  # noqa: BLE001
-            error_text = "".join(traceback.format_exception(exc))
-            matches = ERROR_MEMORY.lookup_all(error_text)
-            return {
-                "answer": f"后端调用失败：{exc}",
-                "elapsed": 0,
-                "tool_calls": 0,
-                "images": [],
-                "files": [],
-                "geometry": None,
-                "legend": [],
-                "trace": [],
-                "error": error_text,
-                "memory_suggestions": [
-                    {"pattern": pattern, "fix": fix} for pattern, fix in matches
-                ],
-            }
+            return backend_error_payload(exc)
 
 
 @app.post("/api/chat/stream")
@@ -2103,9 +2143,13 @@ def chat_stream(
         data_roots = [str(BENCHMARK_DATA_DIR), str(session.uploads_dir), str(session.output_dir)]
         effective_prompt = build_system_prompt(system_prompt, data_roots)
         lc_messages = build_messages(session.messages, effective_prompt)
-    except Exception:
+    except Exception as exc:
         session.lock.release()
-        raise
+        return StreamingResponse(
+            iter([sse_event("error", backend_error_payload(exc))]),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     def generate():
         started = time.time()
@@ -2221,25 +2265,7 @@ def chat_stream(
                 if report:
                     yield sse_event("report", report)
         except Exception as exc:  # noqa: BLE001
-            error_text = "".join(traceback.format_exception(exc))
-            matches = ERROR_MEMORY.lookup_all(error_text)
-            yield sse_event(
-                "error",
-                {
-                    "answer": f"后端调用失败：{exc}",
-                    "elapsed": 0,
-                    "tool_calls": 0,
-                    "images": [],
-                    "files": [],
-                    "geometry": None,
-                    "legend": [],
-                    "trace": [],
-                    "error": error_text,
-                    "memory_suggestions": [
-                        {"pattern": pattern, "fix": fix} for pattern, fix in matches
-                    ],
-                },
-            )
+            yield sse_event("error", backend_error_payload(exc))
         finally:
             session.lock.release()
 
