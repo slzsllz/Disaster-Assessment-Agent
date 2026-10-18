@@ -37,6 +37,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from agent.error_memory import ErrorMemory, normalize_error, redact_secrets
 from agent.db import db
+from agent.news_monitor import DisasterNewsMonitor, create_news_router
 from agent.tool_recovery import recovery_run, wrap_tool
 from agent.knowledge import (
     EmbeddingSettings, KnowledgeBase, RAG_INSTRUCTIONS,
@@ -1064,16 +1065,26 @@ class ChatSession:
         return self.temp_dir / "out"
 
 
+NEWS_MONITOR = DisasterNewsMonitor()
+
+
 @asynccontextmanager
-async def lifespan(_app):
+async def app_lifespan(_app):
     KNOWLEDGE.start()
     try:
         yield
     finally:
-        KNOWLEDGE.stop()
+        try:
+            await NEWS_MONITOR.close()
+        finally:
+            await asyncio.to_thread(KNOWLEDGE.stop)
 
 
-app = FastAPI(title="Disaster Detection Agent API", lifespan=lifespan)
+app = FastAPI(
+    title="Disaster Detection Agent API",
+    lifespan=app_lifespan,
+)
+app.include_router(create_news_router(NEWS_MONITOR))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],

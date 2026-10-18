@@ -14,6 +14,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import RulesLibrary from './components/RulesLibrary.vue'
 import watermarkUrl from './assets/team.png'
 import logoUrl from './assets/szu-logo.png'
+import DisasterNewsNotifications from './components/DisasterNewsNotifications.vue'
 
 const systemPrompt = ref(
   `You are Disaster Detection Agent, a disaster detection and remote-sensing intelligent assessment assistant.
@@ -1018,6 +1019,7 @@ onMounted(async () => {
           <p>{{ currentConversationUpdatedAt }}</p>
         </div>
         <div class="header-actions">
+          <DisasterNewsNotifications />
           <span class="header-status">{{ isSending ? '分析中' : '就绪' }}</span>
           <button
             class="map-toggle"

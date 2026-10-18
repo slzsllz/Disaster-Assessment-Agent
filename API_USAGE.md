@@ -573,3 +573,10 @@ MCP server `TrafficAccidentAnticipation`，函数 `anticipate_traffic_accident`�
 返回标题、原网页链接、内容片段、日期和搜索汇总文件，可用于核对灾害报道及官方公告。
 搜索凭证从根目录 `.env` 的 `QIANFAN_WEB_SEARCH_API_KEY` 读取，不作为工具参数暴露。
 完整配置和调用示例见 [网络搜索说明](docs/WEB_SEARCH.md)。修改后重启后端并新建会话。
+
+## 灾情新闻监听与弹窗
+
+前端右上角“灾情通知”开关控制后台监听，默认关闭。开启后立即检索，之后每 60 秒检索一次，
+新灾情报道去重后在页面弹窗展示；关闭最后一个订阅时停止检索。使用已有百度搜索凭证，无需新增配置。
+接口为 `POST /api/disaster-news/subscriptions` 和 `GET /api/disaster-news/updates`，
+详细生命周期及过滤规则见 [网络搜索说明](docs/WEB_SEARCH.md#灾情新闻通知)。
