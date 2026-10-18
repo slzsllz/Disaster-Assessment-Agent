@@ -71,6 +71,34 @@ class VerificationTests(unittest.TestCase):
                 self.assertFalse(result["sufficient"])
                 self.assertEqual(result["results"], [])
 
+    def test_conversation_context_reaches_both_models_without_becoming_system_instructions(self):
+        context = json.dumps({
+            "current_question": "RAG库里不是有吗",
+            "retrieval_intent": "概述知识库中委内瑞拉地震报告的内容",
+            "previous_user_questions": ["你知道委内瑞拉地震情况吗"],
+        }, ensure_ascii=False)
+        calls = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            calls.append(body)
+            if request.url.path == "/rerank":
+                return httpx.Response(200, json={"output": {"results": [
+                    {"index": 1, "relevance_score": .9}, {"index": 0, "relevance_score": .1},
+                ]}})
+            return httpx.Response(200, json=judge_body(self.approved()))
+
+        with self.client_mock(handler):
+            result = self.verifier.verify(context, CANDIDATES, 1, "", "")
+        self.assertEqual(result["status"], "sufficient")
+        self.assertEqual(calls[0]["input"]["query"], context)
+        judge_input = json.loads(calls[1]["messages"][1]["content"])
+        self.assertEqual(judge_input["query"], context)
+        system = calls[1]["messages"][0]["content"]
+        self.assertIn("current question changes topic", system)
+        self.assertIn("History is not factual evidence", system)
+        self.assertNotIn(context, system)
+
     def test_invalid_or_fabricated_evidence_fails_closed(self):
         invalid = [
             self.approved(evidence=[]),
@@ -85,6 +113,49 @@ class VerificationTests(unittest.TestCase):
             with self.subTest(payload=payload), self.client_mock(lambda request: httpx.Response(200, json=judge_body(payload))):
                 with self.assertRaises(RetrievalVerificationError):
                     self.judge.evaluate("Question", CANDIDATES, "", "")
+
+    def test_multiple_valid_quotes_from_one_passage_are_grouped(self):
+        quotes = ["Before archiving a flood report", "verify the image acquisition date"]
+        approved = self.approved(evidence=[
+            {"id": "direct-evidence", "quote": quote} for quote in quotes + quotes[:1]
+        ])
+        with self.client_mock(lambda _: httpx.Response(200, json=judge_body(approved))):
+            result = self.judge.evaluate("Report contents?", CANDIDATES, "", "")
+        self.assertTrue(result["sufficient"])
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["evidence_quotes"], quotes)
+        self.assertEqual(result["results"][0]["evidence_quote"], quotes[0])
+
+    def test_invalid_quote_is_not_hidden_by_a_valid_duplicate_id(self):
+        approved = self.approved(evidence=[
+            {"id": "direct-evidence", "quote": "verify the image acquisition date"},
+            {"id": "direct-evidence", "quote": "The flood depth was 5 metres."},
+        ])
+        with self.client_mock(lambda _: httpx.Response(200, json=judge_body(approved))):
+            with self.assertRaises(RetrievalVerificationError):
+                self.judge.evaluate("Report contents?", CANDIDATES, "", "")
+
+    def test_double_escaped_whitespace_still_requires_exact_source_text(self):
+        rows = [{"id": "report", "filename": "report.docx",
+                 "content": "报告日期：2026年6月30日\n\n区域A：\t受影响建筑24栋。"}]
+        for count, accepted in ((24, True), (25, False)):
+            quote = f"报告日期：2026年6月30日\\n\\n区域A：\\t受影响建筑{count}栋。"
+            approved = self.approved(evidence=[{"id": "report", "quote": quote}])
+            with self.subTest(count=count), self.client_mock(lambda _: httpx.Response(200, json=judge_body(approved))):
+                if accepted:
+                    result = self.judge.evaluate("Report contents?", rows, "", "")
+                    self.assertEqual(result["results"][0]["evidence_quote"], rows[0]["content"])
+                else:
+                    with self.assertRaises(RetrievalVerificationError):
+                        self.judge.evaluate("Report contents?", rows, "", "")
+
+    def test_literal_backslash_text_is_not_decoded_when_it_already_matches(self):
+        quote = r"Use literal \n in the code example."
+        rows = [{"id": "code", "filename": "code.docx", "content": quote}]
+        approved = self.approved(evidence=[{"id": "code", "quote": quote}])
+        with self.client_mock(lambda _: httpx.Response(200, json=judge_body(approved))):
+            result = self.judge.evaluate("Code example?", rows, "", "")
+        self.assertEqual(result["results"][0]["evidence_quote"], quote)
 
     def test_truncated_or_non_json_judge_output_is_not_accepted(self):
         for data in [judge_body(self.approved(), finish_reason="length"),

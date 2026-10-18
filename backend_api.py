@@ -577,6 +577,25 @@ def build_messages(history: list[dict[str, str]], system_prompt: str | None) -> 
     return messages
 
 
+def build_retrieval_config(question: str, history: list[dict]) -> dict[str, Any]:
+    previous_questions = []
+    # Both chat handlers have already appended the current user turn.
+    for item in history[:-1]:
+        if item.get("role") != "user":
+            continue
+        text = item.get("question", item.get("content", ""))
+        if isinstance(text, list):
+            text = next((block.get("text", "") for block in text
+                         if isinstance(block, dict) and block.get("type") == "text"), "")
+        if not isinstance(text, str):
+            continue
+        text = text.split("\n\nUploaded files:", 1)[0]
+        text = text.split("\n\nThe following uploaded files", 1)[0].strip()
+        if text:
+            previous_questions.append(text[:800])
+    return {"rag_question": question.strip(), "rag_history": previous_questions[-4:]}
+
+
 def last_ai_message(response: dict) -> str:
     for msg in reversed(response.get("messages", [])):
         if isinstance(msg, AIMessage):
@@ -1114,7 +1133,13 @@ def get_session(session_id: str) -> ChatSession:
             temp_dir = TEMP_BASE / session_id
             temp_dir.mkdir(parents=True, exist_ok=True)
             (temp_dir / "out").mkdir(parents=True, exist_ok=True)
-            session = ChatSession(session_id=session_id, temp_dir=temp_dir)
+            history = [
+                {"role": row["role"], "content": row.get("content") or row.get("display_content") or "",
+                 **({"question": row.get("display_content") or row.get("content") or ""}
+                    if row["role"] == "user" else {})}
+                for row in db.get_chat_context(session_id)
+            ]
+            session = ChatSession(session_id=session_id, temp_dir=temp_dir, messages=history)
             SESSIONS[session_id] = session
         return session
 
@@ -1994,6 +2019,7 @@ def chat(
             session.messages.append({
                 "role": "user",
                 "content": build_user_message_content(user_content, uploaded_paths),
+                "question": message.strip(),
             })
 
             # Persist session + user message to DB (upsert; idempotent)
@@ -2032,7 +2058,7 @@ def chat(
                 config={
                     "recursion_limit": recursion_limit,
                     "max_execution_time": max_execution_time,
-                    "configurable": {"rag_question": message.strip()},
+                    "configurable": build_retrieval_config(message, session.messages),
                 },
             )
             elapsed = time.time() - started
@@ -2164,6 +2190,7 @@ def chat_stream(
         session.messages.append({
             "role": "user",
             "content": build_user_message_content(user_content, uploaded_paths),
+            "question": message.strip(),
         })
 
         # Persist session + user message to DB (upsert; idempotent)
@@ -2218,7 +2245,7 @@ def chat_stream(
                 config={
                     "recursion_limit": recursion_limit,
                     "max_execution_time": max_execution_time,
-                    "configurable": {"rag_question": message.strip()},
+                    "configurable": build_retrieval_config(message, session.messages),
                 },
             ):
                 if item["type"] == "delta":

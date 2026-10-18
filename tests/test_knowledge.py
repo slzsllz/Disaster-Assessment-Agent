@@ -19,7 +19,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from agent.db import psycopg, sql, _build_dsn
 from agent.knowledge import (
-    EmbeddingClient, EmbeddingSettings, KnowledgeBase, KnowledgeError, NeedsOCR,
+    EmbeddingClient, EmbeddingSettings, KnowledgeBase, KnowledgeError, NeedsOCR, RAG_INSTRUCTIONS,
     chunk_sections, extract_rule_references, make_search_tool, parse_document,
 )
 
@@ -95,9 +95,43 @@ class EmbeddingTests(unittest.TestCase):
             })
         self.assertTrue(settings.configured)
         self.assertEqual(settings.dimensions, 1024)
+        self.assertEqual(settings.model, "qwen3.7-text-embedding-flash")
+
+    def test_explicit_embedding_model_remains_supported(self):
+        with patch.dict(os.environ, {"RAG_EMBEDDING_MODEL": "text-embedding-v4"}, clear=True):
+            settings = EmbeddingSettings.from_env({
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "chat-secret",
+            })
+        self.assertEqual(settings.model, "text-embedding-v4")
+        flash = EmbeddingSettings(settings.base_url, settings.api_key)
+        self.assertNotEqual(settings.profile, flash.profile)
+
+    def test_flash_openai_compatible_payload_and_vector_validation(self):
+        client = EmbeddingClient(EmbeddingSettings("https://example.test/v1", "secret"))
+        seen = []
+
+        def handle(request):
+            seen.append(json.loads(request.content))
+            return httpx.Response(200, json={"data": [
+                {"index": 0, "embedding": [3, 4] + [0] * 1022},
+            ]})
+
+        original_client = httpx.Client
+        with patch("agent.knowledge.httpx.Client", side_effect=lambda **kw: original_client(
+            transport=httpx.MockTransport(handle), **kw,
+        )):
+            vector = client.embed(["test document"])[0]
+            query = client.embed(["test query"], query=True)[0]
+        self.assertEqual(len(vector), 1024)
+        self.assertEqual(vector[:2], [.6, .8])
+        self.assertEqual(vector, query)
+        self.assertTrue(all(body["model"] == "qwen3.7-text-embedding-flash" for body in seen))
+        self.assertTrue(all(body["dimensions"] == 1024 for body in seen))
+        self.assertTrue(all(body["encoding_format"] == "float" for body in seen))
+        self.assertTrue(all("text_type" not in body for body in seen))
 
     def test_embedding_order_normalization_and_query_type(self):
-        client = EmbeddingClient(EmbeddingSettings("https://example.test/v1", "secret", dimensions=2))
+        client = EmbeddingClient(EmbeddingSettings("https://example.test/v1", "secret", model="text-embedding-v4", dimensions=2))
         seen = []
 
         def handle(request):
@@ -132,6 +166,27 @@ class EmbeddingTests(unittest.TestCase):
 
 
 class RuleToolTests(unittest.TestCase):
+    def test_report_questions_are_in_scope_and_knowledge_precedes_web_search(self):
+        self.assertIn("disaster reports", RAG_INSTRUCTIONS)
+        self.assertIn("before public web search", RAG_INSTRUCTIONS)
+        self.assertIn("not restricted to domestic", RAG_INSTRUCTIONS)
+
+    def test_followup_history_is_hidden_from_model_and_forwarded_to_search(self):
+        class Probe:
+            def search(self, *args, **kwargs):
+                return {"query": args[0], **kwargs}
+        tool = make_search_tool(Probe())
+        self.assertNotIn("config", tool.args)
+        self.assertNotIn("history", tool.args)
+        result = json.loads(tool.invoke({"query": "委内瑞拉地震情况"}, config={
+            "configurable": {
+                "rag_question": "RAG库里不是有吗",
+                "rag_history": ["你知道委内瑞拉地震情况吗"],
+            },
+        }))
+        self.assertEqual(result["question"], "RAG库里不是有吗")
+        self.assertEqual(result["history"], ["你知道委内瑞拉地震情况吗"])
+
     def test_original_question_is_injected_without_exposing_config_to_model(self):
         class Probe:
             def search(self, *args, **kwargs):
@@ -168,6 +223,50 @@ class RuleToolTests(unittest.TestCase):
 
 
 class BackendCitationTests(unittest.TestCase):
+    def test_retrieval_config_only_keeps_recent_user_text_without_attachments(self):
+        import backend_api
+        history = [
+            {"role": "user", "content": "old question " + str(i)} for i in range(6)
+        ] + [
+            {"role": "user", "content": "你知道委内瑞拉地震情况吗"},
+            {"role": "assistant", "content": "There are no overseas reports. Incorrect prior answer."},
+            {"role": "user", "content": [
+                {"type": "text", "text": "分析这份报告\n\nUploaded files:\n/private/report.docx"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,secret"}},
+            ]},
+            {"role": "user", "content": "RAG库里不是有吗"},
+        ]
+        config = backend_api.build_retrieval_config("RAG库里不是有吗", history)
+        self.assertEqual(config["rag_question"], "RAG库里不是有吗")
+        self.assertEqual(len(config["rag_history"]), 4)
+        self.assertIn("你知道委内瑞拉地震情况吗", config["rag_history"])
+        self.assertIn("分析这份报告", config["rag_history"])
+        self.assertNotIn("RAG库里不是有吗", config["rag_history"])
+        self.assertNotIn("Incorrect", json.dumps(config))
+        self.assertNotIn("secret", json.dumps(config))
+        self.assertNotIn("/private/", json.dumps(config))
+        self.assertTrue(all(len(text) <= 800 for text in config["rag_history"]))
+
+    def test_session_restores_database_text_once_after_backend_restart(self):
+        import backend_api
+        rows = [
+            {"role": "user", "content": "你知道委内瑞拉地震情况吗", "display_content": "你知道委内瑞拉地震情况吗"},
+            {"role": "assistant", "content": "Previous answer", "display_content": "Previous answer"},
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            with (
+                patch.object(backend_api, "TEMP_BASE", Path(root)),
+                patch.object(backend_api, "SESSIONS", {}),
+                patch.object(backend_api.db, "get_chat_context", return_value=rows) as load,
+            ):
+                session = backend_api.get_session("restored-session")
+                self.assertEqual(len(session.messages), 2)
+                self.assertIs(backend_api.get_session("restored-session"), session)
+                load.assert_called_once_with("restored-session")
+                session.messages.append({"role": "user", "content": "RAG库里不是有吗"})
+                config = backend_api.build_retrieval_config("RAG库里不是有吗", session.messages)
+                self.assertEqual(config["rag_history"], ["你知道委内瑞拉地震情况吗"])
+
     def test_normal_and_stream_chat_return_and_save_rule_references(self):
         import backend_api
         reference = {"id": "chunk-test", "document_id": str(uuid.uuid4()),
@@ -181,10 +280,12 @@ class BackendCitationTests(unittest.TestCase):
         class Handle:
             def invoke(self, *args, **kwargs):
                 assert kwargs["config"]["configurable"]["rag_question"] == "防汛规则"
+                assert kwargs["config"]["configurable"]["rag_history"] == ["此前询问洪水处置要求"]
                 return response
 
             def stream(self, *args, **kwargs):
                 assert kwargs["config"]["configurable"]["rag_question"] == "防汛规则"
+                assert kwargs["config"]["configurable"]["rag_history"] == ["此前询问洪水处置要求"]
                 yield {"type": "final", "response": response}
 
             def review_answer_and_artifacts(self, raw, uploaded, outputs, **kwargs):
@@ -194,6 +295,7 @@ class BackendCitationTests(unittest.TestCase):
         for streaming in (False, True):
             with self.subTest(streaming=streaming), tempfile.TemporaryDirectory() as root:
                 session = backend_api.ChatSession(session_id="test", temp_dir=Path(root), handle=Handle())
+                session.messages.append({"role": "user", "content": "此前询问洪水处置要求"})
                 with (
                     patch.object(backend_api, "get_session", return_value=session),
                     patch.object(backend_api.db, "create_session"),
@@ -336,6 +438,47 @@ class DatabaseIntegrationTests(unittest.TestCase):
             self.knowledge.search("flood checklist", question=original)
         self.assertEqual(verify.call_args.args[0], original)
 
+    def test_followup_context_reaches_reranking_and_evidence_verification(self):
+        self.add_document()
+        with patch.object(self.knowledge.verifier, "verify", wraps=self.knowledge.verifier.verify) as verify:
+            self.knowledge.search("flood report", question="RAG库里不是有吗",
+                                  history=["你知道洪水报告的内容吗"])
+        context = json.loads(verify.call_args.args[0])
+        self.assertEqual(context["current_question"], "RAG库里不是有吗")
+        self.assertEqual(context["retrieval_intent"], "flood report")
+        self.assertEqual(context["previous_user_questions"], ["你知道洪水报告的内容吗"])
+
+    def test_context_is_bounded_and_current_question_keeps_its_constraints(self):
+        self.add_document()
+        original = "查询深圳洪水报告，但不要给出没有依据的水深。" + "请保留所有约束。" * 400
+        history = [str(i) * 2000 for i in range(10)]
+        with patch.object(self.knowledge.verifier, "verify", wraps=self.knowledge.verifier.verify) as verify:
+            self.knowledge.search("flood report", question=original, history=history)
+        context = json.loads(verify.call_args.args[0])
+        self.assertEqual(context["current_question"], original)
+        self.assertEqual(len(context["previous_user_questions"]), 4)
+        self.assertTrue(all(len(text) <= 800 for text in context["previous_user_questions"]))
+
+    def test_database_context_only_loads_recent_text_in_chronological_order(self):
+        from agent.db import Database
+        with self.database._conn() as conn:
+            conn.execute("DROP TABLE chat_messages")
+            conn.execute("""CREATE TABLE chat_messages (
+                id SERIAL PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
+                display_content TEXT, created_at TIMESTAMPTZ DEFAULT now(),
+                attachment_files JSONB)""")
+            for i in range(45):
+                conn.execute("""INSERT INTO chat_messages
+                    (session_id,role,content,display_content,attachment_files)
+                    VALUES ('history-test','user',%s,%s,'[{"data_base64":"not-context"}]')""",
+                             (f"question {i}", f"question {i}"))
+        with patch.object(Database, "_conn", self.database._conn), patch.object(Database, "_ensure_pool", return_value=True):
+            rows = Database().get_chat_context("history-test")
+        self.assertEqual(len(rows), 40)
+        self.assertEqual(rows[0]["content"], "question 5")
+        self.assertEqual(rows[-1]["content"], "question 44")
+        self.assertTrue(all("attachment_files" not in row for row in rows))
+
     def test_failure_atomicity_and_retry_after_restart(self):
         document = self.knowledge.upload("flood.docx", word_bytes(), {})["document"]
         with patch.object(self.embedder, "embed", side_effect=KnowledgeError("额度不足")):
@@ -354,7 +497,37 @@ class DatabaseIntegrationTests(unittest.TestCase):
             "https://test.invalid/v1", "test", model="other-model", dimensions=2,
         ), database=self.database, embedder=self.embedder)
         self.assertTrue(changed.get_document(document_id)["needs_reindex"])
-        self.assertEqual(changed.search("flood")["results"], [])
+        calls_before = self.embedder.calls
+        result = changed.search("flood")
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["reason"], "index_needs_rebuild")
+        self.assertEqual(result["documents_need_reindex"], 1)
+        self.assertIn("重建索引", result["message"])
+        self.assertEqual(self.embedder.calls, calls_before)
+
+    def test_reindex_warning_respects_enabled_state_and_scope(self):
+        document_id = self.add_document(region="Shenzhen")
+        changed = KnowledgeBase(Path(self.temporary.name), EmbeddingSettings(
+            "https://test.invalid/v1", "test", model="other-model", dimensions=2,
+        ), database=self.database, embedder=self.embedder)
+        self.assertEqual(changed.search("flood", region="Beijing")["status"], "no_match")
+        changed.update_document(document_id, enabled=False)
+        self.assertEqual(changed.search("flood")["status"], "no_match")
+
+    def test_partial_reindex_does_not_report_missing_knowledge(self):
+        self.add_document("old-flood.docx", "Flood response: verify image dates.")
+        changed = KnowledgeBase(Path(self.temporary.name), EmbeddingSettings(
+            "https://test.invalid/v1", "test", model="other-model", dimensions=2,
+        ), database=self.database, embedder=self.embedder, verifier=FakeVerifier())
+        changed.upload("new-earthquake.docx", word_bytes("Earthquake background."), {})
+        changed.process_one()
+        self.assertEqual(changed.search("flood")["reason"], "index_needs_rebuild")
+        self.assertEqual(changed.search("earthquake")["status"], "sufficient")
+        with patch.object(changed.verifier, "verify", return_value={
+            "status": "insufficient", "results": [], "message": "No answer in indexed documents",
+        }):
+            self.assertEqual(changed.search("earthquake")["reason"], "index_needs_rebuild")
 
     def test_expired_lease_is_recovered_and_deleted_job_is_not_resurrected(self):
         document = self.knowledge.upload("flood.docx", word_bytes(), {})["document"]

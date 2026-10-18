@@ -400,6 +400,23 @@ class Database:
             logger.warning("get_chat_messages failed: %s", exc)
             return []
 
+    def get_chat_context(self, session_id: str) -> List[dict]:
+        """Load recent conversation text without attachment/image binary fields."""
+        if not self._ensure_pool():
+            return []
+        try:
+            with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """SELECT role, content, display_content FROM chat_messages
+                       WHERE session_id = %s AND role IN ('user', 'assistant')
+                       ORDER BY created_at DESC, id DESC LIMIT 40""",
+                    (session_id,),
+                )
+                return list(reversed(cur.fetchall()))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_chat_context failed: %s", exc)
+            return []
+
     def delete_session_messages(self, session_id: str) -> bool:
         """清空会话消息并重置计数"""
         if not self._ensure_pool():
