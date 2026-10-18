@@ -1,22 +1,37 @@
 <script setup>
-import { nextTick, ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 
 const props = defineProps({
   open: Boolean,
   news: { type: Array, default: () => [] },
   lastChecked: { type: String, default: '' },
+  checking: Boolean,
+  error: { type: String, default: '' },
 })
 const emit = defineEmits(['update:open'])
-const dialog = ref(null)
+const timerVersion = ref(0)
+let dismissTimer = null
 
-watch([() => props.open, dialog], async ([open, element]) => {
-  await nextTick()
-  if (!element) return
-  if (open && !element.open) element.showModal()
-  if (!open && element.open) element.close()
-}, { flush: 'post' })
+watch([() => props.open, () => props.news], ([open]) => {
+  clearTimeout(dismissTimer)
+  if (open) {
+    timerVersion.value += 1
+    dismissTimer = setTimeout(close, 5000)
+  }
+}, { immediate: true })
 
-function close() { emit('update:open', false) }
+function close() {
+  clearTimeout(dismissTimer)
+  emit('update:open', false)
+}
+function onKeydown(event) {
+  if (props.open && event.key === 'Escape') close()
+}
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onUnmounted(() => {
+  clearTimeout(dismissTimer)
+  window.removeEventListener('keydown', onKeydown)
+})
 function formatTime(value) {
   if (!value) return '发布时间未知'
   const date = new Date(value)
@@ -26,12 +41,14 @@ function formatTime(value) {
 
 <template>
   <Teleport to="body">
-    <dialog ref="dialog" class="disaster-dialog" aria-labelledby="disaster-news-title" @cancel.prevent="close" @close="close" @click.self="close">
+    <Transition name="news-toast">
+    <section v-if="open" class="disaster-dialog" role="dialog" aria-modal="false" aria-labelledby="disaster-news-title">
+      <div :key="timerVersion" class="news-countdown" aria-hidden="true" />
       <section class="disaster-dialog-body">
         <header class="disaster-dialog-header">
           <div>
             <span class="news-eyebrow">灾情动态 · 网络报道</span>
-            <h2 id="disaster-news-title">最新灾情消息 <span>{{ news.length }}</span></h2>
+            <h2 id="disaster-news-title">{{ error ? '灾情通知服务异常' : news.length ? '最新灾情消息' : '灾情通知已开启' }} <span v-if="news.length">{{ news.length }}</span></h2>
           </div>
           <button class="news-close" type="button" aria-label="关闭灾情消息弹窗" @click="close">×</button>
         </header>
@@ -42,21 +59,27 @@ function formatTime(value) {
             <h3><a :href="item.url" target="_blank" rel="noopener noreferrer">{{ item.title }} <span aria-hidden="true">↗</span></a></h3>
             <p>{{ item.summary || '打开原始报道查看详情。' }}</p>
           </article>
-          <p v-if="!news.length" class="news-empty">暂未检索到新的灾情报道，正在持续关注。</p>
+          <p v-if="error" class="news-empty news-error" role="status">{{ error }}</p>
+          <p v-else-if="!news.length" class="news-empty" role="status">{{ checking || !lastChecked ? '正在检索最新灾情，发现新消息后将再次通知。' : '本轮暂无符合条件的灾情报道，将继续每分钟检索。' }}</p>
         </div>
         <footer class="news-footer">
-          <span>{{ lastChecked ? `最近检索 ${formatTime(lastChecked)}` : '正在等待首次检索' }}</span>
+          <span>5 秒后自动收起{{ lastChecked ? ` · 最近检索 ${formatTime(lastChecked)}` : '' }}</span>
           <button type="button" @click="close">我知道了</button>
         </footer>
       </section>
-    </dialog>
+    </section>
+    </Transition>
   </Teleport>
 </template>
 
 <style scoped>
-.disaster-dialog { width: min(660px, calc(100vw - 32px)); max-height: min(78vh, 800px); padding: 0; border: 1px solid #e4e7ec; border-radius: 18px; color: #202123; background: white; box-shadow: 0 24px 80px #10182833; }
-.disaster-dialog::backdrop { background: #11182766; backdrop-filter: blur(3px); }
-.disaster-dialog-body { display: flex; flex-direction: column; max-height: min(78vh, 800px); }
+.disaster-dialog { position: fixed; top: 16px; left: 50%; z-index: 1000; transform: translateX(-50%); width: min(580px, calc(100vw - 32px)); max-height: min(58vh, 520px); padding: 0; overflow: hidden; border: 1px solid #e4e7ec; border-radius: 18px; color: #202123; background: white; box-shadow: 0 12px 40px #10182826; }
+.disaster-dialog-body { display: flex; flex-direction: column; max-height: min(58vh, 520px); }
+.news-countdown { position: absolute; top: 0; left: 0; right: 0; height: 3px; background: #b77825; transform-origin: left; animation: news-dismiss 5s linear forwards; }
+@keyframes news-dismiss { to { transform: scaleX(0); } }
+.news-toast-enter-active, .news-toast-leave-active { transition: opacity .18s ease, transform .18s ease; }
+.news-toast-enter-from, .news-toast-leave-to { opacity: 0; transform: translate(-50%, -12px); }
+@media (prefers-reduced-motion: reduce) { .news-toast-enter-active, .news-toast-leave-active { transition: none; } .news-countdown { animation: none; } }
 .disaster-dialog-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 24px 24px 12px; }
 .news-eyebrow { color: #a15c16; font-size: 12px; font-weight: 600; }
 h2 { margin: 8px 0 0; font-size: 21px; }
@@ -76,5 +99,6 @@ a span { color: #98a2b3; }
 .news-footer span { font-size: 11px; color: #667085; }
 .news-footer button { flex-shrink: 0; border: 0; border-radius: 8px; padding: 9px 16px; background: #202123; color: white; font-size: 12px; }
 .news-empty { padding: 28px 0; text-align: center; color: #667085; }
+.news-error { color: #b42318; }
 @media (max-width: 480px) { .disaster-dialog-header { padding: 18px 18px 12px; } .news-list { padding: 0 18px; } .news-explanation { padding: 0 18px 14px; } .news-footer { padding: 14px 18px; flex-wrap: wrap; } }
 </style>

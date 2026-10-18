@@ -18,6 +18,8 @@ let generation = 0
 let disposed = false
 let subscriptionRequest = null
 let subscriptionRequested = false
+let pendingOpen = false
+const pendingNewsIds = new Set()
 const preferenceKey = 'disaster-news-enabled'
 const seenKey = 'disaster-news-seen'
 let seen = new Set()
@@ -41,15 +43,33 @@ function consume(state) {
   checking.value = state.checking
   lastChecked.value = state.last_checked_at || ''
   error.value = state.error || ''
-  const fresh = (state.news || []).filter(item => !seen.has(item.id))
-  for (const item of fresh) seen.add(item.id)
+  const received = state.news || []
+  const fresh = received.filter(item => !seen.has(item.id))
+  // Persisted IDs suppress repeat alerts, but must not erase the news history.
+  if (received.length) {
+    const merged = new Map([...news.value, ...received].map(item => [item.id, item]))
+    news.value = [...merged.values()].sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at)).slice(0, 50)
+  }
+  for (const item of fresh) pendingNewsIds.add(item.id)
+  if (fresh.length) openNotification()
+}
+
+function openNotification() {
+  // A five-second alert in a background tab would disappear before it is seen.
+  if (document.hidden) {
+    pendingOpen = true
+    return
+  }
+  pendingOpen = false
+  dialogOpen.value = true
+  for (const id of pendingNewsIds) seen.add(id)
+  pendingNewsIds.clear()
   seen = new Set([...seen].slice(-500))
   try { localStorage.setItem(seenKey, JSON.stringify([...seen])) } catch { /* Best effort. */ }
-  if (fresh.length) {
-    const merged = new Map([...news.value, ...fresh].map(item => [item.id, item]))
-    news.value = [...merged.values()].sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at)).slice(0, 50)
-    dialogOpen.value = true
-  }
+}
+
+function restoreVisibility() {
+  if (!document.hidden && enabled.value && pendingOpen) openNotification()
 }
 
 function stopPolling() {
@@ -90,6 +110,7 @@ async function setEnabled(value) {
   if (!value) {
     enabled.value = false
     dialogOpen.value = false
+    pendingOpen = false
     storePreference(false)
   }
   const request = new AbortController()
@@ -106,11 +127,14 @@ async function setEnabled(value) {
     error.value = ''
     if (value) {
       consume(state)
+      // Confirm activation even before the first search or when all news is read.
+      openNotification()
       void poll()
     }
   } catch (err) {
     if (disposed) return
     error.value = value ? '通知开启失败，请检查服务连接后重试。' : '本页通知已关闭，后台订阅将在连接恢复或超时后停止。'
+    if (value) openNotification()
   } finally {
     clearTimeout(timeout)
     subscriptionRequest = null
@@ -138,12 +162,14 @@ onMounted(() => {
   if (preference) void setEnabled(true)
   window.addEventListener('pagehide', releaseSubscription)
   window.addEventListener('pageshow', restorePage)
+  document.addEventListener('visibilitychange', restoreVisibility)
 })
 onUnmounted(() => {
   disposed = true
   releaseSubscription()
   window.removeEventListener('pagehide', releaseSubscription)
   window.removeEventListener('pageshow', restorePage)
+  document.removeEventListener('visibilitychange', restoreVisibility)
 })
 </script>
 
@@ -154,9 +180,9 @@ onUnmounted(() => {
       <span>{{ busy ? '连接中' : '灾情通知' }}</span>
       <span class="notification-switch" aria-hidden="true"><span /></span>
     </button>
-    <button v-if="enabled && news.length" class="news-history" type="button" title="查看已收到的灾情消息" aria-haspopup="dialog" @click="dialogOpen = true">{{ news.length }} 条</button>
+    <button v-if="enabled" class="news-history" type="button" title="查看灾情消息和检索状态" aria-haspopup="dialog" @click="openNotification">{{ news.length ? `${news.length} 条` : '查看消息' }}</button>
     <span v-if="error" class="notification-error" role="status" :title="error">{{ enabled ? '重试中' : '连接异常' }}</span>
-    <DisasterNewsDialog v-model:open="dialogOpen" :news="news" :last-checked="lastChecked" />
+    <DisasterNewsDialog v-model:open="dialogOpen" :news="news" :last-checked="lastChecked" :checking="checking" :error="error" />
   </div>
 </template>
 
