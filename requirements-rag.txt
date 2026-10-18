@@ -1,0 +1,3 @@
+# Additional document parsers only; reuse the project's existing DB/LLM stack.
+pypdf>=5,<7
+python-docx>=1.2,<2
