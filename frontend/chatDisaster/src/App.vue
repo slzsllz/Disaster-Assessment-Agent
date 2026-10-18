@@ -6,9 +6,12 @@ import GraphicsLayer from '@arcgis/core/layers/GraphicsLayer'
 import Map from '@arcgis/core/Map'
 import MapView from '@arcgis/core/views/MapView'
 import { Bottom, Document, Edit, Plus, Top } from '@element-plus/icons-vue'
-import { ElSlider } from 'element-plus'
+import { ElMenu, ElMenuItem, ElSlider } from 'element-plus'
+import 'element-plus/es/components/menu/style/css'
+import 'element-plus/es/components/menu-item/style/css'
 import 'element-plus/es/components/slider/style/css'
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import RulesLibrary from './components/RulesLibrary.vue'
 import watermarkUrl from './assets/team.png'
 import logoUrl from './assets/szu-logo.png'
 import DisasterNewsNotifications from './components/DisasterNewsNotifications.vue'
@@ -60,6 +63,7 @@ const inputText = ref('')
 const attachments = ref([])
 const fileInputRef = ref(null)
 const sidebarOpen = ref(true)
+const currentPage = ref(window.location.pathname === '/rules' ? 'rules' : 'chat')
 const mapDrawerOpen = ref(false)
 const isSending = ref(false)
 const conversationHistory = ref([])
@@ -93,6 +97,24 @@ function closePdfPreview() {
 }
 
 const hasMessages = computed(() => messages.value.length > 0)
+
+function navigateTo(page) {
+  currentPage.value = page
+  const url = new URL(window.location.href)
+  url.pathname = page === 'rules' ? '/rules' : '/'
+  window.history.pushState({}, '', `${url.pathname}${url.search}`)
+  if (page === 'rules') mapDrawerOpen.value = false
+  if (window.innerWidth <= 900) sidebarOpen.value = false
+}
+
+async function handleNavigation() {
+  currentPage.value = window.location.pathname === '/rules' ? 'rules' : 'chat'
+  const id = readSessionIdFromUrl()
+  if (id && id !== sessionId.value) await openConversation({ id })
+}
+
+onMounted(() => window.addEventListener('popstate', handleNavigation))
+onUnmounted(() => window.removeEventListener('popstate', handleNavigation))
 
 function readSessionIdFromUrl() {
   try {
@@ -355,6 +377,7 @@ function mapApiMessage(m) {
     images: (m.images || []).map((img) => ({ name: img.name || 'image', url: img.url })),
     legend: m.legend || [],
     report: m.report || null,
+    retrievalRefs: m.retrieval_refs || [],
     attachments: (m.attachments || []).map((a) => {
       const name = a.name || 'file'
       const url = a.url || ''
@@ -423,6 +446,8 @@ function resetFileInput() {
 }
 
 function startNewConversation() {
+  if (isSending.value) return
+  if (currentPage.value !== 'chat') navigateTo('chat')
   releasePendingFiles()
   messages.value = []
   showScrollBottom.value = false
@@ -432,6 +457,8 @@ function startNewConversation() {
 }
 
 async function openConversation(conversation) {
+  if (isSending.value) return
+  if (currentPage.value !== 'chat') navigateTo('chat')
   if (conversation.id === sessionId.value) return
   releasePendingFiles()
   sessionId.value = conversation.id
@@ -695,6 +722,7 @@ function handleStreamBlock(block, assistantId) {
     message.meta = `${Number(payload.elapsed || 0).toFixed(1)}s · ${payload.tool_calls || 0} tool call(s)`
     message.images = payload.images || []
     message.legend = payload.legend || []
+    message.retrievalRefs = payload.retrieval_refs || []
     message.attachments = (payload.files || []).map((file) => ({
       id: file.url || file.name,
       name: file.name || 'file',
@@ -776,6 +804,7 @@ async function sendMessage() {
         message.meta = `${Number(data.elapsed || 0).toFixed(1)}s · ${data.tool_calls || 0} tool call(s)`
         message.images = data.images || []
         message.legend = data.legend || []
+        message.retrievalRefs = data.retrieval_refs || []
         message.attachments = (data.files || []).map((file) => ({
           id: file.url || file.name,
           name: file.name || 'file',
@@ -898,7 +927,16 @@ onMounted(async () => {
         </label>
       </section>
 
-      <button class="new-chat-button" type="button" @click="startNewConversation">
+      <nav class="sidebar-menu" aria-label="侧栏导航">
+        <el-menu :default-active="currentPage" @select="navigateTo">
+          <el-menu-item index="rules">
+            <Document />
+            <span>添加规则文档</span>
+          </el-menu-item>
+        </el-menu>
+      </nav>
+
+      <button class="new-chat-button" type="button" :disabled="isSending" @click="startNewConversation">
         <Edit />
         <span>创建新对话</span>
       </button>
@@ -910,11 +948,12 @@ onMounted(async () => {
             v-for="conversation in sortedConversationHistory"
             :key="conversation.id"
             class="history-item"
-            :class="{ active: conversation.id === sessionId }"
+            :class="{ active: currentPage === 'chat' && conversation.id === sessionId }"
           >
             <button
               class="history-item-content"
               type="button"
+              :disabled="isSending"
               @click="openConversation(conversation)"
             >
               {{ conversation.title }}
@@ -969,7 +1008,9 @@ onMounted(async () => {
       </footer>
     </aside>
 
-    <section class="chat-pane">
+    <RulesLibrary v-if="currentPage === 'rules'" @back="navigateTo('chat')" />
+
+    <section v-show="currentPage === 'chat'" class="chat-pane">
       <img class="watermark" :src="watermarkUrl" alt="" aria-hidden="true" />
 
       <header class="chat-header">
@@ -1006,6 +1047,20 @@ onMounted(async () => {
           <div class="avatar">{{ message.role === 'user' ? '☻' : '▣' }}</div>
           <div class="message-body">
             <div class="markdown-body" v-html="renderMarkdown(message.content)" />
+            <section v-if="message.retrievalRefs?.length" class="rule-references" aria-label="规则依据">
+              <h3>规则依据</h3>
+              <details v-for="reference in message.retrievalRefs" :key="reference.id">
+                <summary>{{ reference.citation }} {{ reference.filename }} · {{ reference.locator }}</summary>
+                <p class="rule-reference-meta">
+                  {{ reference.source || '未注明发布单位' }}
+                  <template v-if="reference.region"> · {{ reference.region }}</template>
+                  <template v-if="reference.version"> · {{ reference.version }}</template>
+                  <template v-if="reference.effective_date"> · 生效：{{ reference.effective_date }}</template>
+                </p>
+                <p>{{ reference.content }}</p>
+                <a :href="reference.url" target="_blank" rel="noreferrer">查看原文</a>
+              </details>
+            </section>
             <div v-if="message.attachments?.length" class="attachment-list">
               <figure
                 v-for="file in message.attachments"

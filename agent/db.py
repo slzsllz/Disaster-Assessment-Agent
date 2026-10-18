@@ -282,6 +282,7 @@ class Database:
         image_files: list = None,
         legend: list = None,
         report_files: list = None,
+        retrieval_refs: list = None,
     ) -> Optional[int]:
         """保存一条聊天消息，返回消息 ID
 
@@ -299,7 +300,8 @@ class Database:
                 cur.execute(
                     """SELECT column_name FROM information_schema.columns
                        WHERE table_name = 'chat_messages'
-                       AND column_name IN ('legend', 'report_files')"""
+                       AND table_schema = 'public'
+                       AND column_name IN ('legend', 'report_files', 'retrieval_refs')"""
                 )
                 optional_cols = {row[0] for row in cur.fetchall()}
 
@@ -328,6 +330,9 @@ class Database:
                 if "report_files" in optional_cols:
                     base_cols.append("report_files")
                     base_vals.append(Jsonb(report_files) if report_files else None)
+                if "retrieval_refs" in optional_cols:
+                    base_cols.append("retrieval_refs")
+                    base_vals.append(Jsonb(retrieval_refs) if retrieval_refs else None)
 
                 cols_sql = sql.SQL(", ").join(sql.Identifier(c) for c in base_cols)
                 placeholders = sql.SQL(", ").join(sql.Placeholder() * len(base_vals))

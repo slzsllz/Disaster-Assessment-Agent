@@ -50,6 +50,13 @@ button {
   grid-template-columns: 0 minmax(0, 1fr);
 }
 
+.app-shell > .chat-pane,
+.app-shell > .rules-page {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+}
+
 .drawer-toggle {
   position: fixed;
   top: 0.85rem;
@@ -254,6 +261,26 @@ button {
   line-height: 1.15;
   letter-spacing: 0;
 }
+
+.sidebar-menu { margin-top: 1.5rem; }
+.sidebar-menu .el-menu {
+  --el-menu-bg-color: transparent;
+  --el-menu-hover-bg-color: #ededf0;
+  --el-menu-text-color: #343541;
+  --el-menu-active-color: #409eff;
+  border-right: 0;
+}
+.sidebar-menu .el-menu-item { height: 44px; padding: 0 12px !important; }
+.sidebar-menu .el-menu-item.is-active { background: #ecf5ff; }
+.sidebar-menu .el-menu-item svg { width: 18px; height: 18px; margin-right: 10px; flex-shrink: 0; }
+.sidebar-menu + .new-chat-button { margin-top: 12px; }
+.rule-references { margin: 20px 0; padding-top: 14px; border-top: 1px solid #e5e7eb; }
+.rule-references h3 { margin: 0 0 10px; font-size: 14px; color: #606266; }
+.rule-references details { padding: 9px 0; font-size: 14px; }
+.rule-references summary { cursor: pointer; color: #337ecc; overflow-wrap: anywhere; }
+.rule-references p { line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.rule-references .rule-reference-meta { color: #909399; font-size: 12px; }
+.rule-references a { color: #337ecc; }
 
 .sidebar-section {
   margin-top: 1.45rem;
