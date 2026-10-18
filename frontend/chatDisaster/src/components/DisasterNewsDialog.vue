@@ -5,6 +5,8 @@ const props = defineProps({
   open: Boolean,
   news: { type: Array, default: () => [] },
   lastChecked: { type: String, default: '' },
+  checking: Boolean,
+  error: { type: String, default: '' },
 })
 const emit = defineEmits(['update:open'])
 const timerVersion = ref(0)
@@ -46,7 +48,7 @@ function formatTime(value) {
         <header class="disaster-dialog-header">
           <div>
             <span class="news-eyebrow">灾情动态 · 网络报道</span>
-            <h2 id="disaster-news-title">最新灾情消息 <span>{{ news.length }}</span></h2>
+            <h2 id="disaster-news-title">{{ error ? '灾情通知服务异常' : news.length ? '最新灾情消息' : '灾情通知已开启' }} <span v-if="news.length">{{ news.length }}</span></h2>
           </div>
           <button class="news-close" type="button" aria-label="关闭灾情消息弹窗" @click="close">×</button>
         </header>
@@ -57,7 +59,8 @@ function formatTime(value) {
             <h3><a :href="item.url" target="_blank" rel="noopener noreferrer">{{ item.title }} <span aria-hidden="true">↗</span></a></h3>
             <p>{{ item.summary || '打开原始报道查看详情。' }}</p>
           </article>
-          <p v-if="!news.length" class="news-empty">暂未检索到新的灾情报道，正在持续关注。</p>
+          <p v-if="error" class="news-empty news-error" role="status">{{ error }}</p>
+          <p v-else-if="!news.length" class="news-empty" role="status">{{ checking || !lastChecked ? '正在检索最新灾情，发现新消息后将再次通知。' : '本轮暂无符合条件的灾情报道，将继续每分钟检索。' }}</p>
         </div>
         <footer class="news-footer">
           <span>5 秒后自动收起{{ lastChecked ? ` · 最近检索 ${formatTime(lastChecked)}` : '' }}</span>
@@ -96,5 +99,6 @@ a span { color: #98a2b3; }
 .news-footer span { font-size: 11px; color: #667085; }
 .news-footer button { flex-shrink: 0; border: 0; border-radius: 8px; padding: 9px 16px; background: #202123; color: white; font-size: 12px; }
 .news-empty { padding: 28px 0; text-align: center; color: #667085; }
+.news-error { color: #b42318; }
 @media (max-width: 480px) { .disaster-dialog-header { padding: 18px 18px 12px; } .news-list { padding: 0 18px; } .news-explanation { padding: 0 18px 14px; } .news-footer { padding: 14px 18px; flex-wrap: wrap; } }
 </style>
