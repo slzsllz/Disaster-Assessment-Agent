@@ -10,7 +10,7 @@ import { ElMenu, ElMenuItem, ElSlider } from 'element-plus'
 import 'element-plus/es/components/menu/style/css'
 import 'element-plus/es/components/menu-item/style/css'
 import 'element-plus/es/components/slider/style/css'
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import RulesLibrary from './components/RulesLibrary.vue'
 import watermarkUrl from './assets/team.png'
 import logoUrl from './assets/szu-logo.png'
@@ -33,8 +33,8 @@ const messages = ref([])
 const chatContentRef = ref(null)
 const showScrollBottom = ref(false)
 const arcgisContainerRef = ref(null)
-const arcgisView = ref(null)
-const arcgisGraphicsLayer = ref(null)
+const arcgisView = shallowRef(null)
+const arcgisGraphicsLayer = shallowRef(null)
 const mapLoading = ref(false)
 const mapError = ref('')
 const mapViewMode = ref('standard')
@@ -75,7 +75,10 @@ async function handleNavigation() {
 }
 
 onMounted(() => window.addEventListener('popstate', handleNavigation))
-onUnmounted(() => window.removeEventListener('popstate', handleNavigation))
+onUnmounted(() => {
+  window.removeEventListener('popstate', handleNavigation)
+  arcgisView.value?.destroy()
+})
 
 function readSessionIdFromUrl() {
   try {
@@ -459,14 +462,29 @@ const ARCGIS_BASEMAPS = {
   satellite: 'arcgis/imagery',
 }
 
-function applyArcgisBasemap() {
+async function applyArcgisBasemap() {
   if (!arcgisView.value?.map) return
-  arcgisView.value.map.basemap = ARCGIS_BASEMAPS[mapViewMode.value] || ARCGIS_BASEMAPS.standard
+  mapLoading.value = true
+  mapError.value = ''
+  try {
+    arcgisView.value.map.basemap = ARCGIS_BASEMAPS[mapViewMode.value] || ARCGIS_BASEMAPS.standard
+    await arcgisView.value.map.basemap.loadAll()
+  } catch (error) {
+    mapError.value = formatMapError(error)
+  } finally {
+    mapLoading.value = false
+  }
 }
 
 function setMapViewMode(mode) {
+  if (mapLoading.value) return
   mapViewMode.value = mode
   applyArcgisBasemap()
+}
+
+function formatMapError(error) {
+  const message = String(error?.message || error || '无法连接地图服务')
+  return `地图加载失败：${arcgisKey ? message.replaceAll(arcgisKey, '[REDACTED]') : message}`
 }
 
 function clearMapGeometry() {
@@ -524,7 +542,7 @@ async function initArcgisMap() {
     }
     esriConfig.apiKey = arcgisKey
     await nextTick()
-    if (!arcgisContainerRef.value) return
+    if (!arcgisContainerRef.value) throw new Error('地图容器尚未就绪，请重新打开地图。')
 
     arcgisGraphicsLayer.value = new GraphicsLayer()
     const map = new Map({
@@ -537,8 +555,13 @@ async function initArcgisMap() {
       center: [104.1954, 35.8617],
       zoom: 3,
     })
+    await map.basemap.loadAll()
+    await arcgisView.value.when()
   } catch (error) {
-    mapError.value = error.message || String(error)
+    mapError.value = formatMapError(error)
+    arcgisView.value?.destroy()
+    arcgisView.value = null
+    arcgisGraphicsLayer.value = null
   } finally {
     mapLoading.value = false
   }
@@ -548,9 +571,6 @@ async function openMapDrawer() {
   mapDrawerOpen.value = true
   await nextTick()
   await initArcgisMap()
-  nextTick(() => {
-    arcgisView.value?.resize()
-  })
 }
 
 function handleFiles(event) {
@@ -912,6 +932,7 @@ onMounted(async () => {
           <button
             type="button"
             :class="{ active: mapViewMode === 'standard' }"
+            :disabled="mapLoading"
             @click="setMapViewMode('standard')"
           >
             标准
@@ -919,6 +940,7 @@ onMounted(async () => {
           <button
             type="button"
             :class="{ active: mapViewMode === 'satellite' }"
+            :disabled="mapLoading"
             @click="setMapViewMode('satellite')"
           >
             卫星
@@ -930,7 +952,7 @@ onMounted(async () => {
       <div class="map-panel">
         <div v-if="mapLoading" class="map-state">地图加载中...</div>
         <div v-else-if="mapError" class="map-state error">{{ mapError }}</div>
-        <div v-show="!mapLoading && !mapError" ref="arcgisContainerRef" class="arcgis-container" />
+        <div ref="arcgisContainerRef" class="arcgis-container" />
       </div>
 
       <footer class="map-drawer-footer">
