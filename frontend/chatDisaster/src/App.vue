@@ -15,6 +15,7 @@ import RulesLibrary from './components/RulesLibrary.vue'
 import watermarkUrl from './assets/team.png'
 import logoUrl from './assets/szu-logo.png'
 import DisasterNewsNotifications from './components/DisasterNewsNotifications.vue'
+import { mapGraphicDefinitions } from './utils/mapGeometry.js'
 
 const recursionLimit = ref(40)
 const maxExecutionTime = ref(600)
@@ -474,63 +475,29 @@ function clearMapGeometry() {
   mapNotice.value = '暂无空间范围'
 }
 
-function geometryToRings(geom) {
-  if (!geom) return []
-  const geometry = typeof geom === 'string' ? JSON.parse(geom) : geom
-  if (geometry.type === 'Polygon') {
-    return [geometry.coordinates?.[0] || []]
-  }
-  if (geometry.type === 'MultiPolygon') {
-    return (geometry.coordinates || []).map((polygon) => polygon?.[0] || []).filter(Boolean)
-  }
-  return []
-}
-
 async function drawAssessmentGeometry(assessment) {
   if (!assessment?.geom) return false
-  await openMapDrawer()
-  if (!arcgisView.value || !arcgisGraphicsLayer.value) return false
-
-  let rings = []
+  let definitions
   try {
-    rings = geometryToRings(assessment.geom)
+    definitions = mapGraphicDefinitions(assessment.geom)
   } catch {
-    mapNotice.value = '空间范围解析失败'
+    mapNotice.value = '空间数据解析失败'
     return false
   }
-  if (!rings.length) return false
-
+  if (!definitions.graphics.length) return false
+  await openMapDrawer()
+  if (!arcgisView.value || !arcgisGraphicsLayer.value) return false
+  const graphics = definitions.graphics.map(definition => new Graphic(definition))
   arcgisGraphicsLayer.value.removeAll()
-
-  const graphics = rings
-    .map((ring) => ring
-      .filter((point) => Array.isArray(point) && point.length >= 2)
-      .map(([lng, lat]) => [Number(lng), Number(lat)]))
-    .filter((ring) => ring.length >= 3)
-    .map((ring) => new Graphic({
-      geometry: {
-        type: 'polygon',
-        rings: [ring],
-        spatialReference: { wkid: 4326 },
-      },
-      symbol: {
-        type: 'simple-fill',
-        color: [239, 68, 68, 0.18],
-        outline: {
-          color: [239, 68, 68, 0.95],
-          width: 2,
-        },
-      },
-    }))
-
-  if (!graphics.length) return false
   arcgisGraphicsLayer.value.addMany(graphics)
   await arcgisView.value.goTo(graphics, {
     duration: 600,
     padding: { top: 48, right: 48, bottom: 48, left: 48 },
   }).catch(() => {})
   activeMapAssessment.value = assessment
-  mapNotice.value = `${assessment.task || '分析结果'} 空间范围`
+  mapNotice.value = definitions.isRoute
+    ? (definitions.hasRoutes ? '救援路线 · 蓝：医院 / 绿：避难场所 / 橙：消防站（近似 WGS84）' : '灾害位置 · 暂无可达路线')
+    : `${assessment.task || '分析结果'} 空间范围`
   return true
 }
 
@@ -689,7 +656,8 @@ function handleStreamBlock(block, assistantId) {
       preview: '',
     }))
     if (payload.geometry) {
-      drawAssessmentGeometry({ task: '当前分析结果', geom: payload.geometry })
+      message.geometry = payload.geometry
+      message.geometryRendering = drawAssessmentGeometry({ task: '当前分析结果', geom: payload.geometry })
     }
     message.error = ''
   } else if (eventName === 'report') {
@@ -771,6 +739,7 @@ async function sendMessage() {
           preview: '',
         }))
         if (data.geometry) {
+          message.geometry = data.geometry
           await drawAssessmentGeometry({ task: '当前分析结果', geom: data.geometry })
         }
         message.report = data.report || null
@@ -814,7 +783,9 @@ async function sendMessage() {
   } finally {
     isSending.value = false
     await fetchSessions()
-    await showLatestSessionGeometry()
+    const completedMessage = messages.value.find(item => item.id === assistantId)
+    if (completedMessage?.geometryRendering) await completedMessage.geometryRendering
+    if (!completedMessage?.geometry) await showLatestSessionGeometry()
     // AI 总结标题在后台线程执行，稍后再刷新一次以显示 AI 生成的 title
     setTimeout(() => fetchSessions(), 3500)
   }

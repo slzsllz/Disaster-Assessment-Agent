@@ -87,6 +87,7 @@ MCP_CHILD_ENV_KEYS = (
     "DB_PASSWORD",
     "QIANFAN_WEB_SEARCH_API_KEY",
     "QIANFAN_WEB_SEARCH_URL",
+    "AMAP_WEB_KEY",
     "ARCGIS_API_KEY",
     "VITE_ARCGIS_API_KEY",
     "ARCGIS_FEATURE_LAYERS_JSON",
@@ -792,6 +793,21 @@ def extract_bbox_geojson_from_raster(path: str) -> str | None:
 
 
 def extract_first_output_geometry(paths: list[str]) -> str | None:
+    # Prefer planned routes over an earlier disaster raster's footprint.
+    for path in paths:
+        file = Path(path)
+        if file.suffix.lower() != ".geojson":
+            continue
+        try:
+            if file.stat().st_size > 5 * 1024 * 1024:
+                continue
+            collection = json.loads(file.read_text())
+            if (collection.get("type") == "FeatureCollection"
+                    and collection.get("properties", {}).get("task") == "route_planning"
+                    and isinstance(collection.get("features"), list)):
+                return json.dumps(collection, ensure_ascii=False)
+        except (OSError, ValueError, AttributeError):
+            continue
     for path in paths:
         if Path(path).suffix.lower() in {".tif", ".tiff"}:
             geom = extract_bbox_geojson_from_raster(path)
