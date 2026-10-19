@@ -580,3 +580,12 @@ MCP server `TrafficAccidentAnticipation`，函数 `anticipate_traffic_accident`�
 新灾情报道去重后在页面弹窗展示；关闭最后一个订阅时停止检索。使用已有百度搜索凭证，无需新增配置。
 接口为 `POST /api/disaster-news/subscriptions` 和 `GET /api/disaster-news/updates`，
 详细生命周期及过滤规则见 [网络搜索说明](docs/WEB_SEARCH.md#灾情新闻通知)。
+
+## 高德救援路线规划
+
+新增 MCP server `RoutePlanning`，函数 `plan_emergency_routes`。
+提供灾害起点经纬度，或上传 GeoJSON/CSV/带 CRS 的 GeoTIFF 后，可查找附近医院、
+应急避难场所或消防站，比较驾车耗时/距离，返回分步路线和导航链接，并在现有地图展示。
+高德 Key 从 `.env` 的 `AMAP_WEB_KEY` 读取。GPS 使用 `coord_system=wgs84`，高德坐标用 gcj02。
+多要素文件需指定 `feature_index`。普通道路规划不保证灾后通行或设施接收能力。
+详见 [路线规划说明](docs/ROUTE_PLANNING.md)。

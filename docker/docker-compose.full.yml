@@ -39,6 +39,7 @@ services:
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
       QIANFAN_WEB_SEARCH_API_KEY: ${QIANFAN_WEB_SEARCH_API_KEY:-}
       QIANFAN_WEB_SEARCH_URL: ${QIANFAN_WEB_SEARCH_URL:-https://qianfan.baidubce.com/v2/ai_search/web_search}
+      AMAP_WEB_KEY: ${AMAP_WEB_KEY:-}
       ARCGIS_API_KEY: ${ARCGIS_API_KEY}
       RAG_EMBEDDING_BASE_URL: ${RAG_EMBEDDING_BASE_URL:-}
       RAG_EMBEDDING_API_KEY: ${RAG_EMBEDDING_API_KEY:-}

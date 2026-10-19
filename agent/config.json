@@ -2,7 +2,11 @@
     "mcpServers": {
         "WeatherQuery": {
             "command": "python",
-            "args": ["tools/WeatherQuery.py", "--temp_dir", "tmp/tmp/out"]
+            "args": [
+                "tools/WeatherQuery.py",
+                "--temp_dir",
+                "tmp/tmp/out"
+            ]
         },
         "Analysis": {
             "command": "python",
@@ -88,6 +92,14 @@
             "command": "python",
             "args": [
                 "tools/WebSearch.py",
+                "--temp_dir",
+                "tmp/tmp/out"
+            ]
+        },
+        "RoutePlanning": {
+            "command": "python",
+            "args": [
+                "tools/RoutePlanning.py",
                 "--temp_dir",
                 "tmp/tmp/out"
             ]

@@ -15,11 +15,12 @@ import RulesLibrary from './components/RulesLibrary.vue'
 import watermarkUrl from './assets/team.png'
 import logoUrl from './assets/szu-logo.png'
 import DisasterNewsNotifications from './components/DisasterNewsNotifications.vue'
+import { mapGraphicDefinitions } from './utils/mapGeometry.js'
 
 const systemPrompt = ref(
   `You are Disaster Detection Agent, a disaster detection and remote-sensing intelligent assessment assistant.
 
-Your role is to help users analyze remote-sensing images and geospatial data for disaster detection, disaster impact assessment, and environmental risk interpretation. You can use available tools to perform specialized tasks such as earthquake building damage assessment, flood inundation extraction, wildfire burned-area change detection, landslide segmentation, oil spill detection, crop pest-affected area detection, algal bloom candidate detection, geographic context and nearby facility query, remote-sensing index calculation, geospatial statistics, and general GeoAI analysis.
+Your role is to help users analyze remote-sensing images and geospatial data for disaster detection, disaster impact assessment, and environmental risk interpretation. You can use available tools to perform specialized tasks such as earthquake building damage assessment, flood inundation extraction, wildfire burned-area change detection, landslide segmentation, oil spill detection, crop pest-affected area detection, algal bloom candidate detection, geographic context and nearby facility query, remote-sensing index calculation, geospatial statistics, public web search, hospital/shelter/fire-station route planning from incident coordinates or georeferenced data, and general GeoAI analysis.
 
 When answering, follow these rules:
 
@@ -30,6 +31,7 @@ When answering, follow these rules:
 
 2. Use tools when needed.
    - Select the most appropriate tool according to the task type and input data.
+   - Use plan_emergency_routes for hospital/shelter/fire-station routes from a supplied incident location or georeferenced file. Identify the coordinate system, avoid guessing among multiple features, and do not claim routes verify disaster passability or facility readiness.
    - For pre/post disaster tasks, identify pre-disaster and post-disaster images carefully before calling the tool.
    - When a tool returns 'Result saved at /path/to/file', you MUST use the full returned path in any subsequent tool calls.
    - Do not invent results. Base quantitative conclusions on tool outputs, generated summaries, readable metadata, or attached image content.
@@ -514,63 +516,29 @@ function clearMapGeometry() {
   mapNotice.value = '暂无空间范围'
 }
 
-function geometryToRings(geom) {
-  if (!geom) return []
-  const geometry = typeof geom === 'string' ? JSON.parse(geom) : geom
-  if (geometry.type === 'Polygon') {
-    return [geometry.coordinates?.[0] || []]
-  }
-  if (geometry.type === 'MultiPolygon') {
-    return (geometry.coordinates || []).map((polygon) => polygon?.[0] || []).filter(Boolean)
-  }
-  return []
-}
-
 async function drawAssessmentGeometry(assessment) {
   if (!assessment?.geom) return false
-  await openMapDrawer()
-  if (!arcgisView.value || !arcgisGraphicsLayer.value) return false
-
-  let rings = []
+  let definitions
   try {
-    rings = geometryToRings(assessment.geom)
+    definitions = mapGraphicDefinitions(assessment.geom)
   } catch {
-    mapNotice.value = '空间范围解析失败'
+    mapNotice.value = '空间数据解析失败'
     return false
   }
-  if (!rings.length) return false
-
+  if (!definitions.graphics.length) return false
+  await openMapDrawer()
+  if (!arcgisView.value || !arcgisGraphicsLayer.value) return false
+  const graphics = definitions.graphics.map(definition => new Graphic(definition))
   arcgisGraphicsLayer.value.removeAll()
-
-  const graphics = rings
-    .map((ring) => ring
-      .filter((point) => Array.isArray(point) && point.length >= 2)
-      .map(([lng, lat]) => [Number(lng), Number(lat)]))
-    .filter((ring) => ring.length >= 3)
-    .map((ring) => new Graphic({
-      geometry: {
-        type: 'polygon',
-        rings: [ring],
-        spatialReference: { wkid: 4326 },
-      },
-      symbol: {
-        type: 'simple-fill',
-        color: [239, 68, 68, 0.18],
-        outline: {
-          color: [239, 68, 68, 0.95],
-          width: 2,
-        },
-      },
-    }))
-
-  if (!graphics.length) return false
   arcgisGraphicsLayer.value.addMany(graphics)
   await arcgisView.value.goTo(graphics, {
     duration: 600,
     padding: { top: 48, right: 48, bottom: 48, left: 48 },
   }).catch(() => {})
   activeMapAssessment.value = assessment
-  mapNotice.value = `${assessment.task || '分析结果'} 空间范围`
+  mapNotice.value = definitions.isRoute
+    ? (definitions.hasRoutes ? '救援路线 · 蓝：医院 / 绿：避难场所 / 橙：消防站（近似 WGS84）' : '灾害位置 · 暂无可达路线')
+    : `${assessment.task || '分析结果'} 空间范围`
   return true
 }
 
@@ -730,7 +698,8 @@ function handleStreamBlock(block, assistantId) {
       preview: '',
     }))
     if (payload.geometry) {
-      drawAssessmentGeometry({ task: '当前分析结果', geom: payload.geometry })
+      message.geometry = payload.geometry
+      message.geometryRendering = drawAssessmentGeometry({ task: '当前分析结果', geom: payload.geometry })
     }
     message.error = ''
   } else if (eventName === 'report') {
@@ -812,6 +781,7 @@ async function sendMessage() {
           preview: '',
         }))
         if (data.geometry) {
+          message.geometry = data.geometry
           await drawAssessmentGeometry({ task: '当前分析结果', geom: data.geometry })
         }
         message.report = data.report || null
@@ -855,7 +825,9 @@ async function sendMessage() {
   } finally {
     isSending.value = false
     await fetchSessions()
-    await showLatestSessionGeometry()
+    const completedMessage = messages.value.find(item => item.id === assistantId)
+    if (completedMessage?.geometryRendering) await completedMessage.geometryRendering
+    if (!completedMessage?.geometry) await showLatestSessionGeometry()
     // AI 总结标题在后台线程执行，稍后再刷新一次以显示 AI 生成的 title
     setTimeout(() => fetchSessions(), 3500)
   }
