@@ -43,8 +43,13 @@ Returns:
 
 Interpretation guidance:
 - ArcGIS Places returns POIs, not complete building footprints or road networks.
-- For reliable affected-building/road/admin statistics, pass authoritative Feature Layer URLs
-  or use a local spatial database such as PostGIS.
+- Nearby POIs or features within the query extent are not evidence of actual damage,
+  flooding, road closure, or loss of service. Describe them as nearby or potentially exposed.
+- Raster input and Feature Layer intersection queries use a bounding box, not the actual
+  disaster-mask footprint. A bounding-box intersection does not prove disaster-mask intersection.
+- Reliable exposure statistics require authoritative feature data and spatial intersection
+  with the actual disaster footprint, using separate spatial analysis such as PostGIS.
+  Exposure alone does not confirm damage or operational status.
 - Places results are useful for situational awareness, nearby facilities, and preliminary impact interpretation.
 """
 
