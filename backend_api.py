@@ -39,6 +39,7 @@ from agent.error_memory import ErrorMemory, normalize_error, redact_secrets
 from agent.db import db
 from agent.news_monitor import DisasterNewsMonitor, create_news_router
 from agent.tool_recovery import recovery_run, wrap_tool
+from agent.tool_input_guard import guard_tool_inputs, tool_input_scope
 from agent.knowledge import (
     EmbeddingSettings, KnowledgeBase, RAG_INSTRUCTIONS,
     extract_rule_references, make_search_tool,
@@ -186,7 +187,12 @@ def build_system_prompt(base: str, data_roots: list[str]) -> str:
         "user message when files are attached. Tools that accept file paths "
         "should use those provided paths. If the user refers to data in a "
         "directory without naming exact files, ask the user to provide the "
-        "specific file paths or upload the files. Valid project data roots:\n"
+        "specific file paths or upload the files. The directories below are only "
+        "this conversation's upload/output locations, not evidence that files were uploaded. "
+        "Never browse server examples or invent an input path or disaster location. "
+        "If no relevant file was provided in this conversation and the user has not "
+        "specified an exact input path, ask for the file before file-based analysis. "
+        "If the location is also unspecified, ask for it before geographic/weather queries.\n"
         + "\n".join(f"  - {root}" for root in data_roots)
     )
     return base + roots_block + ERROR_MEMORY.format_prompt_block() + "\n\n" + RAG_INSTRUCTIONS
@@ -887,6 +893,7 @@ class AgentHandle:
     """LangGraph/MCP agent pinned to one background asyncio loop."""
 
     def __init__(self, config: dict[str, Any], temp_dir: Path, session_id: str = ""):
+        self.temp_dir = temp_dir.resolve()
         self.loop = asyncio.new_event_loop()
         self.ready: queue.Queue[bool] = queue.Queue(maxsize=1)
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -901,7 +908,7 @@ class AgentHandle:
             client = MultiServerMCPClient(
                 build_mcp_servers(config["mcp_servers"], temp_dir, session_id)
             )
-            tools = [wrap_tool(tool, ERROR_MEMORY) for tool in await client.get_tools()]
+            tools = [wrap_tool(guard_tool_inputs(tool), ERROR_MEMORY) for tool in await client.get_tools()]
             tools.append(make_search_tool(KNOWLEDGE))
             agent = create_react_agent(llm, tools)
             return agent, llm, client, tools
@@ -926,7 +933,7 @@ class AgentHandle:
 
     def invoke(self, messages: list, config: dict | None = None) -> dict:
         async def run_agent():
-            with recovery_run():
+            with recovery_run(), tool_input_scope(self.temp_dir, messages):
                 return await self.agent.ainvoke({"messages": messages}, config=config or {})
 
         return self.run(run_agent())
@@ -977,7 +984,7 @@ class AgentHandle:
         sentinel = object()
 
         async def run_agent():
-            with recovery_run():
+            with recovery_run(), tool_input_scope(self.temp_dir, messages):
                 await stream_agent()
 
         async def stream_agent():
@@ -2035,7 +2042,7 @@ def chat(
             if session.handle is None:
                 session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir, session_id=session_id)
 
-            data_roots = [str(BENCHMARK_DATA_DIR), str(session.uploads_dir), str(session.output_dir)]
+            data_roots = [str(session.uploads_dir), str(session.output_dir)]
             effective_prompt = build_system_prompt(system_prompt, data_roots)
             lc_messages = build_messages(session.messages, effective_prompt)
 
@@ -2206,7 +2213,7 @@ def chat_stream(
         if session.handle is None:
             session.handle = AgentHandle(MODEL_CONFIG, session.temp_dir, session_id=session_id)
 
-        data_roots = [str(BENCHMARK_DATA_DIR), str(session.uploads_dir), str(session.output_dir)]
+        data_roots = [str(session.uploads_dir), str(session.output_dir)]
         effective_prompt = build_system_prompt(system_prompt, data_roots)
         lc_messages = build_messages(session.messages, effective_prompt)
     except Exception as exc:

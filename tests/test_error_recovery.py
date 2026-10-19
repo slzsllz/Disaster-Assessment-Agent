@@ -408,6 +408,12 @@ class BackendRecoveryTests(unittest.TestCase):
             AIMessage(content="<Conclusion>Flood ratio is 20%.</Conclusion>"),
         ])
         with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "uploads" / "scene.tif"
+            image.parent.mkdir()
+            image.touch()
+            for message in model.responses:
+                for call in message.tool_calls:
+                    call["args"]["image_path"] = str(image)
             memory = ErrorMemory(Path(temporary) / "memory.json", database=MemoryDatabase())
             with (
                 patch.object(backend_api, "ERROR_MEMORY", memory),

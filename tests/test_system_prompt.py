@@ -106,6 +106,8 @@ class SystemPromptTests(unittest.TestCase):
                     self.assertIsInstance(handle.messages[0], SystemMessage)
                     self.assertTrue(handle.messages[0].content.startswith(expected))
                     self.assertIn(backend_api.RAG_INSTRUCTIONS, handle.messages[0].content)
+                    self.assertNotIn(str(backend_api.BENCHMARK_DATA_DIR), handle.messages[0].content)
+                    self.assertIn("Never browse server examples", handle.messages[0].content)
                     self.assertEqual(create_session.call_args.kwargs["system_prompt"], expected)
                     self.assertFalse(session.lock.locked())
 
