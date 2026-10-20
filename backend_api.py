@@ -136,6 +136,7 @@ def load_system_prompt(path: Path = SYSTEM_PROMPT_PATH) -> str:
 
 
 DEFAULT_SYSTEM_PROMPT = load_system_prompt()
+
 CONCLUSION_RE = re.compile(r"<Conclusion>(.*?)</Conclusion>", re.DOTALL | re.IGNORECASE)
 ARTIFACTS_RE = re.compile(r"<Artifacts>(.*?)</Artifacts>", re.DOTALL | re.IGNORECASE)
 LOCAL_PATH_RE = re.compile(r"`?(/(?:home\d*|tmp)/[^\s`*),;]+(?:\.[A-Za-z0-9]+))`?")
@@ -182,6 +183,27 @@ OUTPUT_FILES_SECTION_RE = re.compile(
 def build_system_prompt(base: str, data_roots: list[str]) -> str:
     if not base:
         base = DEFAULT_SYSTEM_PROMPT
+    # Keep the fire tool rule when a frontend supplies its own system prompt.
+    fire_marker = "detect_urban_fire_smoke"
+    fire_rule = next(
+        (line for line in DEFAULT_SYSTEM_PROMPT.splitlines() if fire_marker in line),
+        None,
+    )
+    if fire_rule is None:
+        raise RuntimeError("Default fire tool instruction is missing")
+    # Replace stale frontend copies of this rule and keep exactly one copy.
+    lines = []
+    injected = False
+    for line in base.splitlines():
+        if fire_marker in line:
+            if not injected:
+                lines.append(fire_rule)
+                injected = True
+        else:
+            lines.append(line)
+    if not injected:
+        lines.append(fire_rule)
+    base = "\n".join(lines)
     roots_block = (
         "\n\nData access — uploaded file paths are provided directly in the "
         "user message when files are attached. Tools that accept file paths "

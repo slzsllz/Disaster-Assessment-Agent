@@ -1,5 +1,9 @@
 {
     "mcpServers": {
+        "UrbanFireSmoke": {
+            "command": "python",
+            "args": ["tools/UrbanFireSmoke.py", "--temp_dir", "tmp/tmp/out"]
+        },
         "WeatherQuery": {
             "command": "python",
             "args": [
