@@ -119,8 +119,9 @@ class EmbeddingSettings:
 
 
 class EmbeddingClient:
-    def __init__(self, settings: EmbeddingSettings):
+    def __init__(self, settings: EmbeddingSettings, *, timeout: float = 60):
         self.settings = settings
+        self.timeout = timeout
 
     def embed(self, texts: list[str], *, query: bool = False) -> list[list[float]]:
         settings = self.settings
@@ -131,7 +132,7 @@ class EmbeddingClient:
         if settings.model.startswith("text-embedding-"):
             payload["text_type"] = "query" if query else "document"
         try:
-            with httpx.Client(timeout=60, trust_env=False) as client:
+            with httpx.Client(timeout=self.timeout, trust_env=False) as client:
                 response = client.post(
                     f"{settings.base_url}/embeddings", json=payload,
                     headers={"Authorization": f"Bearer {settings.api_key}"},

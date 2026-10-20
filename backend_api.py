@@ -36,12 +36,13 @@ from fastapi.responses import FileResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent.error_memory import ErrorMemory, normalize_error, redact_secrets
+from agent.error_memory_vectors import ErrorVectorIndex
 from agent.db import db
 from agent.news_monitor import DisasterNewsMonitor, create_news_router
 from agent.tool_recovery import recovery_run, wrap_tool
 from agent.tool_input_guard import guard_tool_inputs, tool_input_scope
 from agent.knowledge import (
-    EmbeddingSettings, KnowledgeBase, RAG_INSTRUCTIONS,
+    EmbeddingClient, EmbeddingSettings, KnowledgeBase, RAG_INSTRUCTIONS,
     extract_rule_references, make_search_tool,
 )
 from agent.knowledge_api import knowledge_router
@@ -107,7 +108,6 @@ AGENT_DIR = PROJECT_ROOT / "agent"
 BENCHMARK_DATA_DIR = PROJECT_ROOT / "benchmark" / "data"
 TEMP_BASE = PROJECT_ROOT / "tmp" / "fastapi_out"
 TEMP_BASE.mkdir(parents=True, exist_ok=True)
-ERROR_MEMORY = ErrorMemory(AGENT_DIR / "error_memory.json", database=db)
 
 DEFAULT_CONFIG = AGENT_DIR / next(
     (
@@ -1130,6 +1130,18 @@ app.add_middleware(
 
 MODEL_CONFIG = load_model_config()
 EMBEDDING_SETTINGS = EmbeddingSettings.from_env(MODEL_CONFIG)
+ERROR_VECTOR_INDEX = (
+    ErrorVectorIndex(
+        EmbeddingClient(EMBEDDING_SETTINGS, timeout=15), database=db,
+        min_score=float(os.getenv("ERROR_MEMORY_MIN_SCORE", "0.52")),
+        ambiguity_margin=float(os.getenv("ERROR_MEMORY_AMBIGUITY_MARGIN", "0.08")),
+    )
+    if EMBEDDING_SETTINGS.configured
+    and os.getenv("ERROR_MEMORY_VECTOR_ENABLED", "true").lower() == "true" else None
+)
+ERROR_MEMORY = ErrorMemory(
+    AGENT_DIR / "error_memory.json", database=db, semantic_index=ERROR_VECTOR_INDEX,
+)
 KNOWLEDGE = KnowledgeBase(
     Path(os.getenv("RAG_STORAGE_DIR", str(PROJECT_ROOT / "data" / "knowledge"))),
     EMBEDDING_SETTINGS,

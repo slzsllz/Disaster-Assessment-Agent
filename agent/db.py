@@ -577,6 +577,57 @@ class Database:
     # ==================================================================
     # 4. Error Memory
     # ==================================================================
+    def ensure_error_vector_schema(self) -> bool:
+        """Add a separate vector cache without changing chat or RAG records."""
+        if not self.health_check():
+            return False
+        try:
+            schema = Path(__file__).with_name("error_memory_schema.sql").read_text(encoding="utf-8")
+            with self._conn() as conn, conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(748392602)")
+                cur.execute(schema)
+                conn.commit()
+            return True
+        except Exception:
+            logger.warning("Could not initialize error memory vectors")
+            return False
+
+    def load_error_vectors(self, profile: str) -> Optional[List[dict]]:
+        if not self._ensure_pool():
+            return None
+        try:
+            with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT entry_id, content_hash, embedding FROM error_memory_vectors "
+                    "WHERE embedding_profile = %s", (profile,),
+                )
+                return cur.fetchall()
+        except Exception:
+            logger.warning("Could not load error memory vectors")
+            return None
+
+    def save_error_vector(
+        self, entry_id: str, profile: str, content_hash: str, embedding: List[float],
+    ) -> bool:
+        if not self._ensure_pool():
+            return False
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO error_memory_vectors
+                       (entry_id, embedding_profile, content_hash, embedding)
+                       VALUES (%s, %s, %s, %s)
+                       ON CONFLICT (entry_id, embedding_profile) DO UPDATE SET
+                         content_hash = EXCLUDED.content_hash,
+                         embedding = EXCLUDED.embedding, updated_at = now()""",
+                    (entry_id, profile, content_hash, embedding),
+                )
+                conn.commit()
+            return True
+        except Exception:
+            logger.warning("Could not save error memory vector")
+            return False
+
     def save_error(self, pattern: str, fix: str) -> bool:
         """保存/更新一条错误记忆"""
         if not self._ensure_pool():

@@ -19,11 +19,20 @@ logger = logging.getLogger(__name__)
 
 
 def redact_secrets(text: str) -> str:
-    text = re.sub(r"(?i)(bearer\s+)\S+", r"\1<secret>", text)
+    # Consume quoted values before token-level redaction, including escaped
+    # quotes and truncated values, so whitespace cannot expose a secret suffix.
+    text = re.sub(
+        r"(?i)((?:api[_-]?key|password|token|secret)['\"]?\s*[=:]\s*)"
+        r'''("(?:\\(?:[\s\S]|$)|[^"\\])*(?:"|$)|'(?:\\(?:[\s\S]|$)|[^'\\])*(?:'|$))''',
+        lambda match: match[1] + match[2][0] + "<secret>" + match[2][0],
+        text,
+    )
     text = re.sub(
         r"(?i)((?:api[_-]?key|password|token|secret)['\"]?\s*[=:]\s*['\"]?)[^\s,'\";}]+",
         r"\1<secret>", text,
     )
+    text = re.sub(r"(?i)(bearer\s+)\S+", r"\1<secret>", text)
+    text = re.sub(r"\bAAP[A-Za-z0-9_.-]{40,}", "<secret>", text)
     return re.sub(r"\bsk-[A-Za-z0-9_-]+", "<secret>", text)
 
 
@@ -94,9 +103,13 @@ DEFAULT_MEMORY = {
 class ErrorMemory:
     """Small persistent map from error patterns to repair suggestions."""
 
-    def __init__(self, path: str | Path | None = None, database: Any = None):
+    def __init__(
+        self, path: str | Path | None = None, database: Any = None,
+        semantic_index: Any = None,
+    ):
         self.path = Path(path) if path else None
         self.database = database
+        self.semantic_index = semantic_index
         self._lock = threading.RLock()
         self._last_sync = float("-inf")
         self._db_patterns: set[str] = set()
@@ -197,6 +210,15 @@ class ErrorMemory:
                     matches.append((key, fix))
             matches.sort(key=lambda item: ("::" in item[0], len(item[0])), reverse=True)
             matches = matches[:limit]
+            candidates = dict(self._memory)
+        # Embedding I/O must not hold the memory lock or block exact lookups.
+        if not matches and self.semantic_index is not None:
+            try:
+                matches = self.semantic_index.lookup(error_msg, candidates, tool_name=tool_name)
+            except Exception:
+                logger.warning("Semantic error lookup unavailable; keeping exact matching")
+        with self._lock:
+            matches = [(key, fix) for key, fix in matches if self._memory.get(key) == fix][:limit]
             if self.database is not None:
                 for pattern, fix in matches:
                     try:
@@ -226,6 +248,11 @@ class ErrorMemory:
                         self.save()
                 except Exception:
                     logger.exception("Could not store error memory in database")
+        if self.semantic_index is not None:
+            try:
+                self.semantic_index.index_entries({key: fix})
+            except Exception:
+                logger.warning("Error experience saved; vector indexing deferred")
         return True
 
     def format_prompt_block(self) -> str:
@@ -233,7 +260,8 @@ class ErrorMemory:
         # entire cross-task memory into every user's system prompt.
         return (
             "\n\nTool error recovery: failed tools return an error_recovery object "
-            "with matched past experiences and a remaining attempt budget. Read it "
+            "with matched past experiences and a remaining attempt budget. Matches "
+            "may be semantic similarities, not verified fixes for this error. Read it "
             "before retrying. Correct arguments only when supported by the user's "
             "data and the tool schema; do not invent missing files, substitute a "
             "different model, change scientific thresholds, or install packages "

@@ -101,11 +101,12 @@ def _result_error(content: Any) -> str:
 
 def _failure(
     memory: ErrorMemory, name: str, arguments: dict[str, Any], error: str, attempt: Attempt,
+    *, retrieve_experiences: bool = True,
 ) -> str:
     attempt.failures += 1
     attempt.error = error
     attempt.arguments = dict(arguments)
-    matches = memory.lookup_all(error, tool_name=name)
+    matches = memory.lookup_all(error, tool_name=name) if retrieve_experiences else []
     payload = json.dumps(
         {
             "success": False,
@@ -206,7 +207,12 @@ def wrap_tool(tool: StructuredTool, memory: ErrorMemory) -> StructuredTool:
             return result
 
     def validation_error(exc) -> str:
-        return _failure(memory, tool.name, {}, _exception_text(exc), _attempt(tool.name, {}))
+        # LangChain runs this callback synchronously on the event loop. Schema
+        # failures already explain the correction; do no database/embedding I/O.
+        return _failure(
+            memory, tool.name, {}, _exception_text(exc), _attempt(tool.name, {}),
+            retrieve_experiences=False,
+        )
 
     return tool.model_copy(update={
         "coroutine": call,

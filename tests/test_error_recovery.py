@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool, ToolException
 from langgraph.prebuilt import create_react_agent
 
-from agent.error_memory import ErrorMemory, normalize_error
+from agent.error_memory import ErrorMemory, normalize_error, redact_secrets
 from agent.tool_recovery import MAX_FAILURES, recovery_run, wrap_tool
 
 
@@ -69,6 +69,29 @@ async def invoke_tool(tool, arguments):
 
 
 class ErrorMemoryTests(unittest.TestCase):
+    def test_quoted_credentials_are_fully_redacted(self):
+        for field in ("api_key", "api-key", "password", "token", "secret"):
+            for value in (
+                '"first secret second"', "'first secret second'",
+                '"first\\\" middle secret second"', "'first\\' middle secret second'",
+                '"first\nsecret second"', '"first, secret; second"',
+                '"first secret second', "'first secret second",
+                '"first secret second\\',
+            ):
+                with self.subTest(field=field, value=value):
+                    raw = f'{{"{field}": {value}}}'
+                    redacted = redact_secrets(raw)
+                    for fragment in ("first", "middle", "second"):
+                        self.assertNotIn(fragment, redacted)
+                    self.assertIn("<secret>", redacted)
+
+    def test_redaction_preserves_surrounding_error_and_is_idempotent(self):
+        raw = 'ValueError: {"password": "first secret second", "message": "Invalid bands"}'
+        expected = 'ValueError: {"password": "<secret>", "message": "Invalid bands"}'
+        self.assertEqual(redact_secrets(raw), expected)
+        self.assertEqual(redact_secrets(expected), expected)
+        self.assertIn("Invalid bands", normalize_error(raw))
+
     def test_error_at_end_of_long_traceback_still_matches(self):
         traceback = "Traceback:\n" + "  irrelevant stack frame\n" * 200
         traceback += "ConnectionError: Connection refused"
@@ -131,6 +154,31 @@ class ErrorMemoryTests(unittest.TestCase):
 
 
 class RecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_validation_error_does_not_lookup_experiences_or_execute_tool(self):
+        from pydantic import BaseModel
+
+        class Arguments(BaseModel):
+            count: int
+
+        detect = AsyncMock(return_value="success")
+        memory = ErrorMemory()
+        tool = wrap_tool(StructuredTool(
+            name="detect_test", description="Synthetic detector", args_schema=Arguments,
+            coroutine=detect,
+        ), memory)
+        with patch.object(memory, "lookup_all", side_effect=AssertionError("Blocking lookup on event loop")) as lookup:
+            with recovery_run():
+                for attempt in range(1, 3):
+                    result = await invoke_tool(tool, {"count": "not-an-integer"})
+                    self.assertEqual(result.status, "error")
+                    payload = json.loads(result.content)
+                    self.assertIn("count", payload["error"])
+                    recovery = payload["error_recovery"]
+                    self.assertEqual(recovery["matched_experiences"], [])
+                    self.assertEqual(recovery["remaining_attempts"], MAX_FAILURES - attempt)
+            lookup.assert_not_called()
+        detect.assert_not_awaited()
+
     async def test_output_directory_change_is_not_learned_as_device_repair(self):
         memory = ErrorMemory()
 
