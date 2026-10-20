@@ -255,19 +255,32 @@ class FirePromptTests(unittest.TestCase):
         # Extract only the real prompt/function; avoid importing backend services.
         path = ADAPTER.parents[2] / "backend_api.py"
         tree = ast.parse(path.read_text())
-        nodes = [node for node in tree.body if
-                 (isinstance(node, ast.Assign) and any(
-                     isinstance(t, ast.Name) and t.id == "DEFAULT_SYSTEM_PROMPT" for t in node.targets))
-                 or (isinstance(node, ast.FunctionDef) and node.name == "build_system_prompt")]
-        self.ns = {"ERROR_MEMORY": SimpleNamespace(format_prompt_block=lambda: ""),
-                   "RAG_INSTRUCTIONS": ""}
+        nodes = [
+            node for node in tree.body
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name in ("load_system_prompt", "build_system_prompt")
+            ) or (
+                isinstance(node, ast.Assign)
+                and any(
+                    isinstance(t, ast.Name) and t.id == "DEFAULT_SYSTEM_PROMPT"
+                    for t in node.targets
+                )
+            )
+        ]
+        self.ns = {
+            "Path": Path,
+            "SYSTEM_PROMPT_PATH": path.parent / "agent/prompts/system.md",
+            "ERROR_MEMORY": SimpleNamespace(format_prompt_block=lambda: ""),
+            "RAG_INSTRUCTIONS": "",
+        }
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), self.ns)
 
     def test_default_prompt_has_only_l_and_retains_other_tool_rules(self):
         default = self.ns["DEFAULT_SYSTEM_PROMPT"]
         result = self.ns["build_system_prompt"](default, [])
-        self.assertEqual(result.count("Use detect_urban_fire_smoke for smoke/fire detection"), 1)
-        self.assertIn("always uses YOLOv5l", result)
+        self.assertEqual(result.count("detect_urban_fire_smoke"), 1)
+        self.assertIn("固定使用 YOLOv5l", result)
         self.assertNotIn("model_name='s'", result)
         self.assertIn("FireBurnedAreaChange", result)
         for line in default.splitlines():
@@ -277,16 +290,16 @@ class FirePromptTests(unittest.TestCase):
     def test_custom_prompt_gets_fire_rule(self):
         result = self.ns["build_system_prompt"]("自定义系统提示词", [])
         self.assertIn("自定义系统提示词", result)
-        self.assertIn("always uses YOLOv5l", result)
+        self.assertIn("固定使用 YOLOv5l", result)
 
     def test_stale_and_duplicate_fire_rules_replaced(self):
         old = "Use detect_urban_fire_smoke for smoke/fire detection; model_name='s' by default"
         result = self.ns["build_system_prompt"]("CUSTOM\n" + old + "\n" + old, [])
         self.assertIn("CUSTOM", result)
-        self.assertEqual(result.count("Use detect_urban_fire_smoke for smoke/fire detection"), 1)
+        self.assertEqual(result.count("detect_urban_fire_smoke"), 1)
         self.assertNotIn("model_name='s'", result)
         again = self.ns["build_system_prompt"](result, [])
-        self.assertEqual(again.count("Use detect_urban_fire_smoke for smoke/fire detection"), 1)
+        self.assertEqual(again.count("detect_urban_fire_smoke"), 1)
 
 if __name__ == "__main__":
     unittest.main()

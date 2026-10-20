@@ -10,52 +10,13 @@ import { ElMenu, ElMenuItem, ElSlider } from 'element-plus'
 import 'element-plus/es/components/menu/style/css'
 import 'element-plus/es/components/menu-item/style/css'
 import 'element-plus/es/components/slider/style/css'
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import RulesLibrary from './components/RulesLibrary.vue'
 import watermarkUrl from './assets/team.png'
 import logoUrl from './assets/szu-logo.png'
 import DisasterNewsNotifications from './components/DisasterNewsNotifications.vue'
+import { mapGraphicDefinitions } from './utils/mapGeometry.js'
 
-const systemPrompt = ref(
-  `You are Disaster Detection Agent, a disaster detection and remote-sensing intelligent assessment assistant.
-
-Your role is to help users analyze remote-sensing images and geospatial data for disaster detection, disaster impact assessment, and environmental risk interpretation. You can use available tools to perform specialized tasks such as earthquake building damage assessment, flood inundation extraction, wildfire burned-area change detection, landslide segmentation, oil spill detection, crop pest-affected area detection, algal bloom candidate detection, geographic context and nearby facility query, remote-sensing index calculation, geospatial statistics, and general GeoAI analysis.
-
-When answering, follow these rules:
-
-1. Understand the user's intent first.
-   - Determine which disaster or environmental phenomenon the user is asking about.
-   - Determine whether the task requires tool execution, image interpretation, file analysis, or only an explanatory answer.
-   - If the user uploads files, infer their roles from filename, content, metadata, and context when possible.
-
-2. Use tools when needed.
-   - Select the most appropriate tool according to the task type and input data.
-   - For pre/post disaster tasks, identify pre-disaster and post-disaster images carefully before calling the tool.
-   - When a tool returns 'Result saved at /path/to/file', you MUST use the full returned path in any subsequent tool calls.
-   - Do not invent results. Base quantitative conclusions on tool outputs, generated summaries, readable metadata, or attached image content.
-
-3. Interpret results like a remote-sensing disaster analyst.
-   - Summarize the key detection results clearly.
-   - Explain what the detected areas mean in practical disaster-assessment terms.
-   - Include important numbers such as area, pixel count, percentage, damage level, confidence, or class distribution when available.
-   - Mention limitations when relevant, such as model uncertainty, image quality, missing bands, cloud cover, lack of ground truth, binary-mask limitations, or index-threshold uncertainty.
-
-4. Answer style.
-   - Use Chinese by default unless the user asks otherwise.
-   - Keep the answer clear, professional, and easy to read.
-   - Do not expose local absolute file paths in the final natural-language answer.
-   - The first-pass answer should focus only on the main disaster analysis and conclusion.
-   - Do not include "文件说明", "输出文件", "可下载文件", or similar file-list sections in the first-pass answer.
-   - Do not force a "下一步建议" section in the first-pass answer; follow-up suggestions will be added by the second-pass multimodal review when useful.
-
-Finish your final response with a clearly labelled conclusion block:
-Put the complete user-facing main analysis inside <Conclusion>. Do not write
-user-facing analysis outside the <Conclusion> block.
-
-<Conclusion>
-你的灾害检测主体分析和结论
-</Conclusion>`
-)
 const recursionLimit = ref(40)
 const maxExecutionTime = ref(600)
 const showTrace = ref(false)
@@ -72,8 +33,8 @@ const messages = ref([])
 const chatContentRef = ref(null)
 const showScrollBottom = ref(false)
 const arcgisContainerRef = ref(null)
-const arcgisView = ref(null)
-const arcgisGraphicsLayer = ref(null)
+const arcgisView = shallowRef(null)
+const arcgisGraphicsLayer = shallowRef(null)
 const mapLoading = ref(false)
 const mapError = ref('')
 const mapViewMode = ref('standard')
@@ -114,7 +75,10 @@ async function handleNavigation() {
 }
 
 onMounted(() => window.addEventListener('popstate', handleNavigation))
-onUnmounted(() => window.removeEventListener('popstate', handleNavigation))
+onUnmounted(() => {
+  window.removeEventListener('popstate', handleNavigation)
+  arcgisView.value?.destroy()
+})
 
 function readSessionIdFromUrl() {
   try {
@@ -498,14 +462,29 @@ const ARCGIS_BASEMAPS = {
   satellite: 'arcgis/imagery',
 }
 
-function applyArcgisBasemap() {
+async function applyArcgisBasemap() {
   if (!arcgisView.value?.map) return
-  arcgisView.value.map.basemap = ARCGIS_BASEMAPS[mapViewMode.value] || ARCGIS_BASEMAPS.standard
+  mapLoading.value = true
+  mapError.value = ''
+  try {
+    arcgisView.value.map.basemap = ARCGIS_BASEMAPS[mapViewMode.value] || ARCGIS_BASEMAPS.standard
+    await arcgisView.value.map.basemap.loadAll()
+  } catch (error) {
+    mapError.value = formatMapError(error)
+  } finally {
+    mapLoading.value = false
+  }
 }
 
 function setMapViewMode(mode) {
+  if (mapLoading.value) return
   mapViewMode.value = mode
   applyArcgisBasemap()
+}
+
+function formatMapError(error) {
+  const message = String(error?.message || error || '无法连接地图服务')
+  return `地图加载失败：${arcgisKey ? message.replaceAll(arcgisKey, '[REDACTED]') : message}`
 }
 
 function clearMapGeometry() {
@@ -514,63 +493,29 @@ function clearMapGeometry() {
   mapNotice.value = '暂无空间范围'
 }
 
-function geometryToRings(geom) {
-  if (!geom) return []
-  const geometry = typeof geom === 'string' ? JSON.parse(geom) : geom
-  if (geometry.type === 'Polygon') {
-    return [geometry.coordinates?.[0] || []]
-  }
-  if (geometry.type === 'MultiPolygon') {
-    return (geometry.coordinates || []).map((polygon) => polygon?.[0] || []).filter(Boolean)
-  }
-  return []
-}
-
 async function drawAssessmentGeometry(assessment) {
   if (!assessment?.geom) return false
-  await openMapDrawer()
-  if (!arcgisView.value || !arcgisGraphicsLayer.value) return false
-
-  let rings = []
+  let definitions
   try {
-    rings = geometryToRings(assessment.geom)
+    definitions = mapGraphicDefinitions(assessment.geom)
   } catch {
-    mapNotice.value = '空间范围解析失败'
+    mapNotice.value = '空间数据解析失败'
     return false
   }
-  if (!rings.length) return false
-
+  if (!definitions.graphics.length) return false
+  await openMapDrawer()
+  if (!arcgisView.value || !arcgisGraphicsLayer.value) return false
+  const graphics = definitions.graphics.map(definition => new Graphic(definition))
   arcgisGraphicsLayer.value.removeAll()
-
-  const graphics = rings
-    .map((ring) => ring
-      .filter((point) => Array.isArray(point) && point.length >= 2)
-      .map(([lng, lat]) => [Number(lng), Number(lat)]))
-    .filter((ring) => ring.length >= 3)
-    .map((ring) => new Graphic({
-      geometry: {
-        type: 'polygon',
-        rings: [ring],
-        spatialReference: { wkid: 4326 },
-      },
-      symbol: {
-        type: 'simple-fill',
-        color: [239, 68, 68, 0.18],
-        outline: {
-          color: [239, 68, 68, 0.95],
-          width: 2,
-        },
-      },
-    }))
-
-  if (!graphics.length) return false
   arcgisGraphicsLayer.value.addMany(graphics)
   await arcgisView.value.goTo(graphics, {
     duration: 600,
     padding: { top: 48, right: 48, bottom: 48, left: 48 },
   }).catch(() => {})
   activeMapAssessment.value = assessment
-  mapNotice.value = `${assessment.task || '分析结果'} 空间范围`
+  mapNotice.value = definitions.isRoute
+    ? (definitions.hasRoutes ? '救援路线 · 蓝：医院 / 绿：避难场所 / 橙：消防站（近似 WGS84）' : '灾害位置 · 暂无可达路线')
+    : `${assessment.task || '分析结果'} 空间范围`
   return true
 }
 
@@ -597,7 +542,7 @@ async function initArcgisMap() {
     }
     esriConfig.apiKey = arcgisKey
     await nextTick()
-    if (!arcgisContainerRef.value) return
+    if (!arcgisContainerRef.value) throw new Error('地图容器尚未就绪，请重新打开地图。')
 
     arcgisGraphicsLayer.value = new GraphicsLayer()
     const map = new Map({
@@ -610,8 +555,13 @@ async function initArcgisMap() {
       center: [104.1954, 35.8617],
       zoom: 3,
     })
+    await map.basemap.loadAll()
+    await arcgisView.value.when()
   } catch (error) {
-    mapError.value = error.message || String(error)
+    mapError.value = formatMapError(error)
+    arcgisView.value?.destroy()
+    arcgisView.value = null
+    arcgisGraphicsLayer.value = null
   } finally {
     mapLoading.value = false
   }
@@ -621,9 +571,6 @@ async function openMapDrawer() {
   mapDrawerOpen.value = true
   await nextTick()
   await initArcgisMap()
-  nextTick(() => {
-    arcgisView.value?.resize()
-  })
 }
 
 function handleFiles(event) {
@@ -684,7 +631,6 @@ function createChatFormData(text, localAttachments) {
   const formData = new FormData()
   formData.append('session_id', sessionId.value)
   formData.append('message', text)
-  formData.append('system_prompt', systemPrompt.value)
   formData.append('recursion_limit', String(recursionLimit.value))
   formData.append('max_execution_time', String(maxExecutionTime.value))
   formData.append('show_trace', String(showTrace.value))
@@ -730,7 +676,8 @@ function handleStreamBlock(block, assistantId) {
       preview: '',
     }))
     if (payload.geometry) {
-      drawAssessmentGeometry({ task: '当前分析结果', geom: payload.geometry })
+      message.geometry = payload.geometry
+      message.geometryRendering = drawAssessmentGeometry({ task: '当前分析结果', geom: payload.geometry })
     }
     message.error = ''
   } else if (eventName === 'report') {
@@ -812,6 +759,7 @@ async function sendMessage() {
           preview: '',
         }))
         if (data.geometry) {
+          message.geometry = data.geometry
           await drawAssessmentGeometry({ task: '当前分析结果', geom: data.geometry })
         }
         message.report = data.report || null
@@ -855,7 +803,9 @@ async function sendMessage() {
   } finally {
     isSending.value = false
     await fetchSessions()
-    await showLatestSessionGeometry()
+    const completedMessage = messages.value.find(item => item.id === assistantId)
+    if (completedMessage?.geometryRendering) await completedMessage.geometryRendering
+    if (!completedMessage?.geometry) await showLatestSessionGeometry()
     // AI 总结标题在后台线程执行，稍后再刷新一次以显示 AI 生成的 title
     setTimeout(() => fetchSessions(), 3500)
   }
@@ -982,6 +932,7 @@ onMounted(async () => {
           <button
             type="button"
             :class="{ active: mapViewMode === 'standard' }"
+            :disabled="mapLoading"
             @click="setMapViewMode('standard')"
           >
             标准
@@ -989,6 +940,7 @@ onMounted(async () => {
           <button
             type="button"
             :class="{ active: mapViewMode === 'satellite' }"
+            :disabled="mapLoading"
             @click="setMapViewMode('satellite')"
           >
             卫星
@@ -1000,7 +952,7 @@ onMounted(async () => {
       <div class="map-panel">
         <div v-if="mapLoading" class="map-state">地图加载中...</div>
         <div v-else-if="mapError" class="map-state error">{{ mapError }}</div>
-        <div v-show="!mapLoading && !mapError" ref="arcgisContainerRef" class="arcgis-container" />
+        <div ref="arcgisContainerRef" class="arcgis-container" />
       </div>
 
       <footer class="map-drawer-footer">

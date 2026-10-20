@@ -202,6 +202,7 @@ button {
 }
 
 .map-panel {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -221,9 +222,10 @@ button {
 }
 
 .map-state {
+  position: absolute;
+  inset: 0.75rem;
+  z-index: 2;
   display: grid;
-  width: 100%;
-  min-height: 100%;
   place-items: center;
   padding: 1.5rem;
   border: 1px dashed #d8d8df;
@@ -232,6 +234,7 @@ button {
   color: #6e6e80;
   text-align: center;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .map-state.error {
