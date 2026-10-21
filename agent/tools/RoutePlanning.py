@@ -325,6 +325,7 @@ async def plan_emergency_routes(
                                  'returned_poi_count': len(raw_pois), 'eligible_poi_count': len(pois),
                                  'candidates': candidates, 'recommended': reachable[0] if reachable else None})
     features = [{'type': 'Feature', 'properties': {'role': 'incident', 'name': '灾害位置'},
+                 'geometry_gcj02': {'type': 'Point', 'coordinates': incident},
                  'geometry': {'type': 'Point', 'coordinates': gcj02_to_wgs84_approx(incident)}}]
     for group in destinations:
         recommended = group.get('recommended')
@@ -332,9 +333,11 @@ async def plan_emergency_routes(
         route, poi = recommended['route'], recommended['facility']
         properties = {'role': 'route', 'destination_type': group['destination_type'], 'name': poi['name'],
                       'distance_m': route['distance_m'], 'duration_s': route['duration_s']}
-        features.append({'type': 'Feature', 'properties': properties, 'geometry': {
+        features.append({'type': 'Feature', 'properties': properties,
+                         'geometry_gcj02': {'type': 'LineString', 'coordinates': route['polyline_gcj02']}, 'geometry': {
             'type': 'LineString', 'coordinates': [gcj02_to_wgs84_approx(p) for p in route['polyline_gcj02']]}})
         features.append({'type': 'Feature', 'properties': {**properties, 'role': 'destination'},
+                         'geometry_gcj02': {'type': 'Point', 'coordinates': poi['location_gcj02']},
                          'geometry': {'type': 'Point', 'coordinates': gcj02_to_wgs84_approx(poi['location_gcj02'])}})
     successful = sum(g.get('status') == 'success' for g in destinations)
     result = {
@@ -355,7 +358,8 @@ async def plan_emergency_routes(
     out.mkdir(parents=True, exist_ok=True)
     geojson_path = out / 'routes.geojson'
     geojson_path.write_text(json.dumps({'type': 'FeatureCollection', 'properties': {
-        'task': 'route_planning', 'coordinate_conversion': 'approximate_gcj02_inverse'}, 'features': features},
+        'task': 'route_planning', 'coordinate_conversion': 'approximate_gcj02_inverse',
+        'native_geometry_field': 'geometry_gcj02'}, 'features': features},
         ensure_ascii=False, allow_nan=False), encoding='utf-8')
     result['outputs'] = {'geojson_path': str(geojson_path)}
     result['summary_path'] = str(out / 'summary.json')

@@ -16,6 +16,8 @@ import watermarkUrl from './assets/team.png'
 import logoUrl from './assets/szu-logo.png'
 import DisasterNewsNotifications from './components/DisasterNewsNotifications.vue'
 import { mapGraphicDefinitions } from './utils/mapGeometry.js'
+import { selectMapProvider } from './utils/mapProvider.js'
+import AMapDisplay from './components/AMapDisplay.vue'
 
 const recursionLimit = ref(40)
 const maxExecutionTime = ref(600)
@@ -38,6 +40,7 @@ const arcgisGraphicsLayer = shallowRef(null)
 const mapLoading = ref(false)
 const mapError = ref('')
 const mapViewMode = ref('standard')
+const mapProvider = ref('amap')
 const activeMapAssessment = ref(null)
 const mapNotice = ref('暂无空间范围')
 const arcgisKey = import.meta.env.VITE_ARCGIS_API_KEY || ''
@@ -490,6 +493,7 @@ function formatMapError(error) {
 function clearMapGeometry() {
   arcgisGraphicsLayer.value?.removeAll()
   activeMapAssessment.value = null
+  mapProvider.value = 'amap'
   mapNotice.value = '暂无空间范围'
 }
 
@@ -503,19 +507,22 @@ async function drawAssessmentGeometry(assessment) {
     return false
   }
   if (!definitions.graphics.length) return false
-  await openMapDrawer()
-  if (!arcgisView.value || !arcgisGraphicsLayer.value) return false
-  const graphics = definitions.graphics.map(definition => new Graphic(definition))
-  arcgisGraphicsLayer.value.removeAll()
-  arcgisGraphicsLayer.value.addMany(graphics)
-  await arcgisView.value.goTo(graphics, {
-    duration: 600,
-    padding: { top: 48, right: 48, bottom: 48, left: 48 },
-  }).catch(() => {})
+  mapProvider.value = selectMapProvider(assessment.geom)
   activeMapAssessment.value = assessment
   mapNotice.value = definitions.isRoute
-    ? (definitions.hasRoutes ? '救援路线 · 蓝：医院 / 绿：避难场所 / 橙：消防站（近似 WGS84）' : '灾害位置 · 暂无可达路线')
+    ? (definitions.hasRoutes ? '救援路线 · 蓝：医院 / 绿：避难场所 / 橙：消防站' : '灾害位置 · 暂无可达路线')
     : `${assessment.task || '分析结果'} 空间范围`
+  await openMapDrawer()
+  if (mapProvider.value === 'arcgis') {
+    if (!arcgisView.value || !arcgisGraphicsLayer.value) return false
+    const graphics = definitions.graphics.map(definition => new Graphic(definition))
+    arcgisGraphicsLayer.value.removeAll()
+    arcgisGraphicsLayer.value.addMany(graphics)
+    await arcgisView.value.goTo(graphics, {
+      duration: 600,
+      padding: { top: 48, right: 48, bottom: 48, left: 48 },
+    }).catch(() => {})
+  }
   return true
 }
 
@@ -570,7 +577,7 @@ async function initArcgisMap() {
 async function openMapDrawer() {
   mapDrawerOpen.value = true
   await nextTick()
-  await initArcgisMap()
+  if (mapProvider.value === 'arcgis') await initArcgisMap()
 }
 
 function handleFiles(event) {
@@ -925,10 +932,10 @@ onMounted(async () => {
     <aside class="map-drawer" :class="{ open: mapDrawerOpen }">
       <header class="map-drawer-header">
         <div>
-          <h2>地图</h2>
+          <h2>{{ mapProvider === 'amap' ? '高德地图' : 'ArcGIS 地图' }}</h2>
           <p>{{ mapNotice }}</p>
         </div>
-        <div class="map-layer-toggle" role="group" aria-label="地图图层">
+        <div v-if="mapProvider === 'arcgis'" class="map-layer-toggle" role="group" aria-label="地图图层">
           <button
             type="button"
             :class="{ active: mapViewMode === 'standard' }"
@@ -950,9 +957,10 @@ onMounted(async () => {
       </header>
 
       <div class="map-panel">
-        <div v-if="mapLoading" class="map-state">地图加载中...</div>
-        <div v-else-if="mapError" class="map-state error">{{ mapError }}</div>
-        <div ref="arcgisContainerRef" class="arcgis-container" />
+        <AMapDisplay v-if="mapDrawerOpen && mapProvider === 'amap'" :geometry="activeMapAssessment?.geom" />
+        <div v-if="mapProvider === 'arcgis' && mapLoading" class="map-state">地图加载中...</div>
+        <div v-else-if="mapProvider === 'arcgis' && mapError" class="map-state error">{{ mapError }}</div>
+        <div v-show="mapProvider === 'arcgis'" ref="arcgisContainerRef" class="arcgis-container" />
       </div>
 
       <footer class="map-drawer-footer">

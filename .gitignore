@@ -75,3 +75,5 @@ model/UString/*
 model/UString/samples/*
 !model/UString/samples/README.md
 agent/*config
+
+docs/*.docx

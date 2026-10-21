@@ -120,6 +120,9 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         data=json.loads(Path(result['outputs']['geojson_path']).read_text())
         self.assertEqual([f['geometry']['type'] for f in data['features']],['Point','LineString','Point'])
         self.assertNotEqual(data['features'][0]['geometry']['coordinates'],ORIGIN)
+        self.assertEqual(data['features'][0]['geometry_gcj02']['coordinates'], ORIGIN)
+        self.assertEqual(data['features'][1]['geometry_gcj02']['coordinates'], recommended['route']['polyline_gcj02'])
+        self.assertEqual(data['features'][2]['geometry_gcj02']['coordinates'], recommended['facility']['location_gcj02'])
 
     async def test_community_station_is_not_recommended_as_hospital(self):
         def handler(request):

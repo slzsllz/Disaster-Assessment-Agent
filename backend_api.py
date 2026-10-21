@@ -39,6 +39,7 @@ from agent.error_memory import ErrorMemory, normalize_error, redact_secrets
 from agent.error_memory_vectors import ErrorVectorIndex
 from agent.db import db
 from agent.news_monitor import DisasterNewsMonitor, create_news_router
+from agent.amap_display import create_amap_router
 from agent.tool_recovery import recovery_run, wrap_tool
 from agent.tool_input_guard import guard_tool_inputs, tool_input_scope
 from agent.knowledge import (
@@ -1120,6 +1121,7 @@ app = FastAPI(
     lifespan=app_lifespan,
 )
 app.include_router(create_news_router(NEWS_MONITOR))
+app.include_router(create_amap_router())
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],

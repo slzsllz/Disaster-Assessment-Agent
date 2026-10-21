@@ -4,8 +4,6 @@ MCP server：`RoutePlanning`；工具函数：`plan_emergency_routes`。
 服务端入口 `agent/tools/RoutePlanning.py`，坐标/文件处理 `agent/route_geometry.py`。
 已注册到三份 Agent 配置，支持在聊天中直接说明灾害、提供坐标或上传地理数据后规划。
 
-本次实现前已在 `SpringBreeze` 执行 `git pull --ff-only`，远端返回 Already up to date。
-
 ## 配置
 
 项目根目录 `.env`：
@@ -73,8 +71,11 @@ AMAP_WEB_KEY=your-amap-web-service-key
 
 每次独立保存 `summary.json` 和 `routes.geojson`，避免多次规划互相覆盖。
 GeoJSON 使用公开 GCJ 模型的近似数值逆变换得到 WGS84，仅用于地图展示；
-原始导航坐标保持高德返回的 GCJ02。聊天结果自动打开现有地图显示起点、路线和设施点：
-蓝色医院、绿色避难场所、橙色消防站。底图仍使用项目现有 ArcGIS 配置。
+原始导航坐标保持高德返回的 GCJ02，并通过 Feature 的 `geometry_gcj02` 扩展字段保留。
+聊天结果自动打开地图显示起点、路线和设施点：蓝色医院、绿色避难场所、橙色消防站。
+国内地点使用高德底图和原始 GCJ02 路线，国外地点继续使用 ArcGIS。
+旧路线文件也可展示，通过近似正变换适配高德底图；新路线无需往返转换。
+配置、国内外选择和高德底图交互见 [地图展示](MAP_DISPLAY.md)。
 
 ## CLI
 
