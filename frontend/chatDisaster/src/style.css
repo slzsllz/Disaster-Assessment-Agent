@@ -814,6 +814,11 @@ input[type="checkbox"] {
   margin: 0;
 }
 
+.attachment.video {
+  width: min(480px, 100%);
+  max-width: 100%;
+}
+
 .attachment img {
   width: 128px;
   height: 92px;
@@ -1028,6 +1033,41 @@ input[type="checkbox"] {
 .pending-file small {
   flex: 0 0 auto;
   color: #8e8ea0;
+}
+
+.pending-video {
+  width: min(280px, 100%);
+  max-width: 100%;
+  padding: 7px;
+  border: 1px solid #e5e5e5;
+  border-radius: 12px;
+  background: #f7f7f8;
+}
+
+.pending-video-caption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #6e6e80;
+}
+
+.pending-video-caption span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-video-caption button {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 50%;
+  background: white;
+  cursor: pointer;
+  padding: 2px 7px;
 }
 
 /* ------------------------------------------------------------------ */

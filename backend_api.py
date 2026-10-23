@@ -40,6 +40,7 @@ from agent.error_memory_vectors import ErrorVectorIndex
 from agent.db import db
 from agent.news_monitor import DisasterNewsMonitor, create_news_router
 from agent.amap_display import create_amap_router
+from agent.video_preview import create_video_router
 from agent.tool_recovery import recovery_run, wrap_tool
 from agent.tool_input_guard import guard_tool_inputs, tool_input_scope
 from agent.knowledge import (
@@ -1152,6 +1153,7 @@ KNOWLEDGE = KnowledgeBase(
 app.include_router(knowledge_router(KNOWLEDGE))
 SESSIONS: dict[str, ChatSession] = {}
 FILES: dict[str, Path] = {}
+app.include_router(create_video_router(FILES, TEMP_BASE / 'video_previews'))
 SESSIONS_LOCK = threading.Lock()
 
 
@@ -2167,6 +2169,7 @@ def chat(
                 "tool_calls": len(trace),
                 "images": [file_payload(path) for path in images],
                 "files": [file_payload(path) for path in output_files],
+                "uploaded_files": [file_payload(path) for path in uploaded_paths],
                 "geometry": geometry,
                 "legend": legend,
                 "trace": trace if show_trace else [],
@@ -2269,6 +2272,7 @@ def chat_stream(
         _final_user_question = message
         _final_image_paths: list[str] = []
         try:
+            yield sse_event("uploaded", {"files": [file_payload(path) for path in uploaded_paths]})
             yield sse_event("status", {"message": "正在思考..."})
             for item in session.handle.stream(
                 lc_messages,

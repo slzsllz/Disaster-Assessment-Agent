@@ -18,6 +18,8 @@ import DisasterNewsNotifications from './components/DisasterNewsNotifications.vu
 import { mapGraphicDefinitions } from './utils/mapGeometry.js'
 import { selectMapProvider } from './utils/mapProvider.js'
 import AMapDisplay from './components/AMapDisplay.vue'
+import VideoAttachment from './components/VideoAttachment.vue'
+import { isVideoFile } from './utils/mediaFiles.js'
 
 const recursionLimit = ref(40)
 const maxExecutionTime = ref(600)
@@ -81,6 +83,8 @@ onMounted(() => window.addEventListener('popstate', handleNavigation))
 onUnmounted(() => {
   window.removeEventListener('popstate', handleNavigation)
   arcgisView.value?.destroy()
+  releasePendingFiles()
+  releaseMessageFiles()
 })
 
 function readSessionIdFromUrl() {
@@ -349,16 +353,17 @@ function mapApiMessage(m) {
       const name = a.name || 'file'
       const url = a.url || ''
       const ext = name.split('.').pop().toLowerCase()
-      const isImage = a.type
-        ? previewableImageTypes.has(a.type)
+      const type = a.type || a.mime_type || ''
+      const isImage = type
+        ? previewableImageTypes.has(type)
         : ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff'].includes(ext)
-      // 只有用户上传的图片才显示预览；模型输出文件保持下载按钮
+      // 上传图片显示预览；视频由播放器处理，其他输出文件保持下载按钮。
       const preview = m.role === 'user' && isImage ? url : ''
       return {
         id: url || name || a.path || 'file',
         name,
         size: a.size || 0,
-        type: a.type || '',
+        type,
         url,
         preview,
       }
@@ -406,6 +411,14 @@ function releasePendingFiles() {
   resetFileInput()
 }
 
+function releaseMessageFiles() {
+  for (const message of messages.value) {
+    for (const file of message.attachments || []) {
+      if (file.preview?.startsWith('blob:')) URL.revokeObjectURL(file.preview)
+    }
+  }
+}
+
 function resetFileInput() {
   if (fileInputRef.value) {
     fileInputRef.value.value = ''
@@ -416,6 +429,7 @@ function startNewConversation() {
   if (isSending.value) return
   if (currentPage.value !== 'chat') navigateTo('chat')
   releasePendingFiles()
+  releaseMessageFiles()
   messages.value = []
   showScrollBottom.value = false
   sessionId.value = crypto.randomUUID()
@@ -428,6 +442,7 @@ async function openConversation(conversation) {
   if (currentPage.value !== 'chat') navigateTo('chat')
   if (conversation.id === sessionId.value) return
   releasePendingFiles()
+  releaseMessageFiles()
   sessionId.value = conversation.id
   writeSessionIdToUrl(conversation.id)
   messages.value = []
@@ -582,13 +597,14 @@ async function openMapDrawer() {
 
 function handleFiles(event) {
   const files = Array.from(event.target.files || [])
+  releasePendingFiles()
   attachments.value = files.map((file) => ({
     id: `${file.name}-${file.lastModified}`,
     file,
     name: file.name,
     size: file.size,
     type: file.type,
-    preview: previewableImageTypes.has(file.type) ? URL.createObjectURL(file) : '',
+    preview: previewableImageTypes.has(file.type) || isVideoFile(file) ? URL.createObjectURL(file) : '',
   }))
   resetFileInput()
 }
@@ -647,7 +663,15 @@ function createChatFormData(text, localAttachments) {
   return formData
 }
 
-function handleStreamBlock(block, assistantId) {
+function registerUploadedFiles(userId, files = []) {
+  const user = messages.value.find(item => item.id === userId)
+  for (const [index, file] of (user?.attachments || []).entries()) {
+    // Keep the local preview URL while the video is playing; add the persisted download URL.
+    if (files[index]?.url) file.url = files[index].url
+  }
+}
+
+function handleStreamBlock(block, assistantId, userId) {
   const lines = block.split('\n')
   let eventName = 'message'
   const dataLines = []
@@ -666,7 +690,9 @@ function handleStreamBlock(block, assistantId) {
   const message = messages.value.find((item) => item.id === assistantId)
   if (!message) return
 
-  if (eventName === 'delta') {
+  if (eventName === 'uploaded') {
+    registerUploadedFiles(userId, payload.files)
+  } else if (eventName === 'delta') {
     message.content += payload.text || ''
   } else if (eventName === 'status') {
     message.meta = payload.message || ''
@@ -706,9 +732,10 @@ async function sendMessage() {
   if (!text && attachments.value.length === 0) return
 
   const localAttachments = [...attachments.value]
+  const userId = crypto.randomUUID()
   writeSessionIdToUrl(sessionId.value)
   messages.value.push({
-    id: crypto.randomUUID(),
+    id: userId,
     role: 'user',
     content: text || 'Please analyze the uploaded file(s).',
     attachments: localAttachments,
@@ -752,6 +779,7 @@ async function sendMessage() {
         throw new Error(`HTTP ${fallbackResponse.status}`)
       }
       const data = await fallbackResponse.json()
+      registerUploadedFiles(userId, data.uploaded_files)
       const message = messages.value.find((item) => item.id === assistantId)
       if (message) {
         message.content = data.answer || '(empty response)'
@@ -792,12 +820,12 @@ async function sendMessage() {
       buffer += decoder.decode(value, { stream: true })
       const blocks = buffer.split('\n\n')
       buffer = blocks.pop() || ''
-      blocks.forEach((block) => handleStreamBlock(block, assistantId))
+      blocks.forEach((block) => handleStreamBlock(block, assistantId, userId))
     }
 
     buffer += decoder.decode()
     if (buffer.trim()) {
-      handleStreamBlock(buffer, assistantId)
+      handleStreamBlock(buffer, assistantId, userId)
     }
   } catch (error) {
     const message = messages.value.find((item) => item.id === assistantId)
@@ -1026,9 +1054,11 @@ onMounted(async () => {
                 v-for="file in message.attachments"
                 :key="file.id"
                 class="attachment"
-                :class="{ image: file.preview }"
+                :class="{ image: file.preview && !isVideoFile(file), video: isVideoFile(file) }"
               >
-                <img v-if="file.preview" :src="file.preview" :alt="file.name" />
+                <VideoAttachment v-if="isVideoFile(file)" :src="file.preview || file.url" :name="file.name"
+                  :download-url="file.url || file.preview" :active="currentPage === 'chat'" />
+                <img v-else-if="file.preview" :src="file.preview" :alt="file.name" />
                 <a
                   v-else-if="file.url"
                   class="file-chip downloadable"
@@ -1120,8 +1150,15 @@ onMounted(async () => {
 
         <div class="composer-main">
           <div v-if="attachments.length" class="pending-files">
+            <div v-for="file in attachments.filter(isVideoFile)" :key="file.id" class="pending-video">
+              <VideoAttachment :src="file.preview" :name="file.name" :active="currentPage === 'chat'" />
+              <div class="pending-video-caption">
+                <span :title="file.name">{{ file.name }} · {{ formatSize(file.size) }}</span>
+                <button type="button" :aria-label="`移除视频 ${file.name}`" @click="clearAttachment(file.id)">×</button>
+              </div>
+            </div>
             <button
-              v-for="file in attachments"
+              v-for="file in attachments.filter(file => !isVideoFile(file))"
               :key="file.id"
               type="button"
               class="pending-file"
@@ -1133,7 +1170,7 @@ onMounted(async () => {
           </div>
           <textarea
             v-model="inputText"
-            placeholder="输入问题，或添加栅格/图片文件；时序数据请按时间先后顺序上传"
+            placeholder="输入问题，或添加视频/图片/栅格文件；时序数据请按时间先后顺序上传"
             rows="1"
             :disabled="isSending"
             @keydown.enter.exact.prevent="sendMessage"
