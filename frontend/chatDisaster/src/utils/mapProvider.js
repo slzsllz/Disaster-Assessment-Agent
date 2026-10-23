@@ -87,13 +87,18 @@ export function amapFeatures(value) {
   })
 }
 
+// AMap static maps at scale=1 use 512 * 2^zoom image pixels per world.
+// Verified against native API paths at zoom 15/16/17. A 256px base shrinks overlays
+// by half and also gives the wrong fit bounds and pan distances. ArcGIS uses its own SDK.
+const AMAP_STATIC_WORLD_SIZE = 512
+
 export function worldPixel([lon, lat], zoom) {
-  const size = 256 * 2**zoom, rad = Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI / 180
+  const size = AMAP_STATIC_WORLD_SIZE * 2**zoom, rad = Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI / 180
   return [(lon + 180) / 360 * size, (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * size]
 }
 
 export function pixelLocation([x, y], zoom) {
-  const size = 256 * 2**zoom
+  const size = AMAP_STATIC_WORLD_SIZE * 2**zoom
   return [((x / size * 360) % 360 + 360) % 360 - 180,
     Math.max(-85, Math.min(85, Math.atan(Math.sinh(Math.PI * (1 - 2*y/size))) * 180 / Math.PI))]
 }

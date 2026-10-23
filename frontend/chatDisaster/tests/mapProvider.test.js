@@ -43,6 +43,36 @@ test('Mercator pan and fit keep route points within the image', () => {
   assert.equal(fitMap([],640,480).zoom,4)
 })
 
+test('AMap projected route matches independently observed native static-map pixels', () => {
+  // Official /v3/staticmap paths at location=113.937409,22.527149, zoom=15,
+  // size=934*811, scale=1. These are observed blue-line pixels, not a round-trip test.
+  const center = worldPixel([113.937409,22.527149],15)
+  const reference = [
+    { coordinates:[113.938865,22.521864], pixel:[535,672] },
+    { coordinates:[113.934225,22.522616], pixel:[319,634] },
+    { coordinates:[113.938302,22.529187], pixel:[509,303] },
+    { coordinates:[113.940625,22.531118], pixel:[617,205] },
+    { coordinates:[113.94055,22.531199], pixel:[613,201] },
+    { coordinates:[113.939057,22.532359], pixel:[544,143] },
+  ]
+  for (const {coordinates,pixel} of reference) {
+    const projected=worldPixel(coordinates,15).map((value,i)=>value-center[i]+[467,405.5][i])
+    assert.ok(Math.hypot(projected[0]-pixel[0],projected[1]-pixel[1])<2,coordinates.join(','))
+  }
+})
+
+test('one level zoom doubles AMap pixel offsets and panning preserves the drag distance', () => {
+  const center=[113.937409,22.527149],point=[113.940625,22.531118]
+  const offset=z=>worldPixel(point,z).map((v,i)=>v-worldPixel(center,z)[i])
+  assert.ok(Math.abs(offset(16)[0]-offset(15)[0]*2)<1e-6)
+  assert.ok(Math.abs(offset(16)[1]-offset(15)[1]*2)<1e-6)
+  const pixels=worldPixel(center,15)
+  const after=pixelLocation([pixels[0]-80,pixels[1]-30],15)
+  const next=worldPixel(after,15)
+  assert.ok(Math.abs(next[0]-pixels[0]+80)<1e-6)
+  assert.ok(Math.abs(next[1]-pixels[1]+30)<1e-6)
+})
+
 test('malformed artifact geometry does not break other valid map features', () => {
   const geometry={type:'Point',coordinates:[116.404,39.915]}
   const result=amapFeatures({type:'FeatureCollection',features:[
