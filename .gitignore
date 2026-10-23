@@ -67,6 +67,7 @@ data/
 model/UString/*
 !model/UString/infer.py
 !model/UString/video_features.py
+!model/UString/video_preview.py
 !model/UString/README.md
 !model/UString/LICENSE
 !model/UString/requirements.txt

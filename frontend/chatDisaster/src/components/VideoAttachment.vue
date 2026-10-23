@@ -7,6 +7,7 @@ const props = defineProps({
   name: { type: String, default: '视频' },
   downloadUrl: { type: String, default: '' },
   active: { type: Boolean, default: true },
+  original: { type: Boolean, default: true },
 })
 const video = ref(null)
 const failed = ref(false)
@@ -39,16 +40,16 @@ onBeforeUnmount(() => {
   <div class="video-attachment">
     <video v-if="source" ref="video" :src="source" :aria-label="name" controls playsinline preload="metadata"
       @error="onError" @loadedmetadata="preparing = false; failed = false">
-      当前浏览器不支持视频播放，请下载原视频。
+      当前浏览器不支持视频播放，请下载视频。
     </video>
     <p v-if="preparing" class="video-hint" role="status">正在准备兼容预览，请稍候...</p>
     <p v-if="failed" class="video-hint" role="alert">
-      {{ compatible ? '兼容预览暂时无法播放，可重试或下载原视频。' : '当前浏览器无法播放此视频。' }}
+      {{ compatible ? '兼容预览暂时无法播放，可重试或下载视频。' : '当前浏览器无法播放此视频。' }}
       <button v-if="previewUrl" type="button" @click="preparePreview">{{ compatible ? '重试预览' : '生成兼容预览' }}</button>
-      <span v-else>可发送后生成兼容预览，或下载原视频。</span>
+      <span v-else>可发送后生成兼容预览，或下载视频。</span>
     </p>
     <p v-else-if="!source" class="video-hint">视频链接不可用。</p>
-    <a v-if="downloadUrl || src" class="video-download" :href="downloadUrl || src" :download="name">下载原视频</a>
+    <a v-if="downloadUrl || src" class="video-download" :href="downloadUrl || src" :download="name">{{ original ? '下载原视频' : '下载视频' }}</a>
   </div>
 </template>
 

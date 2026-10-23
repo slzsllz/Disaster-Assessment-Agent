@@ -209,6 +209,18 @@ def predict(input_paths: dict, weights_path: str = None, output_dir: str = './ou
     axes[1].legend()
     vis_path = out_dir / (source.stem + '_accident_vis.png')
     figure.savefig(vis_path)
+    video_preview = {'status': 'not_available', 'reason': 'Features-only input has no source video to render.'}
+    if 'video' in input_paths:
+        renderer = local_module('video_preview', 'video_preview.py')
+        with np.load(feature_path, allow_pickle=False) as cached:
+            boxes = np.asarray(cached['det'])
+        try:
+            video_preview = renderer.render_video_preview(
+                video_module.iter_frames(source, effective_fps, start, len(values)), boxes, times, values,
+                effective_fps, threshold, mode, out_dir / (source.stem + '_accident_preview.mp4'))
+        except (RuntimeError, ValueError, OSError) as exc:
+            # Keep computed scores and charts when visualization fails, with an explicit reason.
+            video_preview = {'status': 'error', 'reason': str(exc)}
     crossing = np.flatnonzero(values[:, 0] >= threshold)
     return {
         'model_name': 'UString', 'disaster_type': 'traffic_accident', 'task_type': 'anticipation',
@@ -219,11 +231,12 @@ def predict(input_paths: dict, weights_path: str = None, output_dir: str = './ou
                     'threshold': threshold, 'threshold_exceeded': bool(len(crossing)),
                     'first_threshold_time_s': float(times[crossing[0]]) if len(crossing) else None,
                     'curve_path': str(curve_path), 'vis_path': str(vis_path),
+                    **({'video_path': video_preview['path']} if video_preview['status'] == 'success' else {}),
                     **{k: video_meta[k] for k in ('feature_path', 'preview_path') if k in video_meta}},
         'meta': {'weights': str(weights), 'device': str(target), 'requested_device': requested_device,
                  'fps': effective_fps, 'mc_samples': samples, 'seed': seed,
                  'missing_checkpoint_keys': missing, 'checkpoint_compatibility': checkpoint_info,
-                 'video': video_meta, 'resolution_m': None,
+                 'video': video_meta, 'video_preview': video_preview, 'resolution_m': None,
                  'input_spec': 'Dashcam video or DAD/VGG16 NPZ: data=(T,20,4096), det=(T,19,4 or 6).'},
         'reliability': {'metric': {}, 'level': 'unvalidated', 'note':
             ({'experimental': 'Missing recurrent weights; seeded random recurrence. Experimental only. ',

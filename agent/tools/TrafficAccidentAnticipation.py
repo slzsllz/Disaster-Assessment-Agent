@@ -41,6 +41,11 @@ fps is feature sampling rate (DAD default 20), threshold is a score cutoff (defa
 mc_samples is Bayesian sample count (2..100), seed controls repeatability.
 Returns per-frame accident scores, aleatoric/epistemic uncertainty, threshold crossing time,
 CSV curve, PNG visualization, summary path, and reliability metadata.
+Video inputs also generate outputs.video_path: a browser-playable H.264 MP4 of the analyzed
+sampled clip, with source timestamps, ROI proposals, current scores/uncertainty and a score curve.
+ROI boxes are feature proposals, not accident locations. The clip has no audio and does not
+include unprocessed video frames. Features-only input cannot generate a video without source frames.
+If meta.video_preview.status=error, report its reason; scores and charts remain available.
 Scores are not calibrated probabilities; crossing time is not accident time or lead time.
 Explain findings and limitations first; leave output paths in the tool result.
 """

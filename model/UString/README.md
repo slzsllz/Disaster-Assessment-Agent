@@ -9,6 +9,7 @@
 UString/
   infer.py                 # 统一接口、CLI、结果文件
   video_features.py        # 视频采样、区域采样、VGG16 提取
+  video_preview.py         # 处理后采样片段、候选框、分数与不确定性叠加
   model/                   # 推理网络、Cascade R-CNN torchvision 适配
   weights/
     cascade_kitti.pth       # 已下载的 KITTI Cascade R-CNN 原始权重
@@ -125,8 +126,20 @@ MCP server：`TrafficAccidentAnticipation`，函数：`anticipate_traffic_accide
 使用项目现有 FastMCP；输入 `video_path` 或 `features_path`，只能选一个。
 
 共享结果 schema：`model_name/disaster_type/task_type/status/outputs/meta/reliability`。
-输出逐帧分数、不确定性、阈值时间、CSV、PNG；视频输入额外输出 NPZ 缓存和首帧框预览。
+输出逐帧分数、不确定性、阈值时间、CSV、PNG；视频输入额外输出 NPZ 缓存、首帧框预览及
+**`outputs.video_path`：`*_accident_preview.mp4` 处理后预览视频**。
 工具额外写入 `summary.json`。首帧框是特征提取候选区域，不是事故定位框。
+
+处理后视频使用 H.264 / yuv420p 和 faststart，聊天助手消息中可直接播放、拖动和下载。
+每帧显示源视频时间戳、候选区域、事故分数、阈值、两种不确定性及截至当前帧的分数曲线。
+顶部持续标记 `UNVALIDATED` 和兼容/实验模式；候选框明确标为 ROI，不能解释为事故定位框。
+没有检测目标时的整帧回退不绘制为目标框；不会根据高分给车辆编造事故类别。
+仅输出实际分析的采样片段，按有效采样 FPS 播放，不补充未分析帧；不保留音频。
+纯特征 NPZ 输入无法还原原视频，`meta.video_preview.status=not_available`。
+缺少 FFmpeg、编码器或源视频解码变化时，保留数值与图表，并通过
+`meta.video_preview.status=error` 和 `reason` 明确说明，不伪造视频路径。
+后端会保留已生成的交通预览，避免被展示复核的空附件选择过滤；历史助手消息也能恢复视频。
+需要 FFmpeg/libx264，Docker 后端已包含该依赖。旧分析记录需重新运行才能产生该视频。
 
 ## 验证
 
@@ -134,10 +147,11 @@ MCP server：`TrafficAccidentAnticipation`，函数：`anticipate_traffic_accide
 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m unittest discover -s tests -p test_ustring.py -v
 ```
 
-2026-10-23 验证：13 项 UString 测试及 7 项系统提示词回归测试通过。
+2026-10-23 验证：16 项 UString 测试、7 项系统提示词回归及 2 项处理后视频附件测试通过。
 使用真实权重，通过 MCP 视频入口在 CPU 上完成两帧合成视频推理，未传实验开关，
-返回 `legacy_compatible`；CSV、PNG、NPZ、预览图和 summary 均生成，视频/缓存推理分数完全一致。
-本机冒烟测试约 20 秒，结果位于项目 `tmp/ustring_checkpoint_fix/`。
+返回 `legacy_compatible`；CSV、PNG、NPZ、预览图、H.264 处理后视频和 summary 均生成，
+视频/缓存推理分数完全一致。处理后视频帧数与实际采样数一致。
+本机冒烟测试约 20 秒，结果位于项目 `tmp/ustring_processed_video/`。
 合成输入仅验证运行和接口，不验证真实交通事故预测能力。
 
 ## 引用

@@ -448,7 +448,9 @@ def build_multimodal_review_content(
                 "<Artifacts>{\"display\":[\"exact generated filename or path\"],"
                 "\"download\":[\"exact generated filename or path\"]}</Artifacts>\n\n"
                 "Rules:\n"
-                "- display: only generated images that are useful for visual inspection by the user.\n"
+                "- display: generated images or processed video previews useful for visual inspection.\n"
+                "- Keep a generated *_accident_preview.mp4 for traffic video analysis; it is the processed clip, "
+                "not a duplicate of the original upload.\n"
                 "- download: only generated files that are useful to the user for verification, GIS, reports, or downstream analysis.\n"
                 "- Do not include model weights, checkpoints, source files, or unhelpful intermediate artifacts.\n"
                 "- If two artifacts contain the same information, keep the clearer one.\n\n"
@@ -562,9 +564,12 @@ def extract_artifact_selection(text: str, output_paths: list[str]) -> tuple[list
 
 def choose_frontend_artifacts(answer_text: str, output_paths: list[str]) -> tuple[list[str], list[str]]:
     selection = extract_artifact_selection(answer_text, output_paths)
-    if selection is not None:
-        return selection
-    return split_output_files(output_paths)
+    images, files = selection if selection is not None else split_output_files(output_paths)
+    # A traffic preview is a primary result. Keep it even when review selects just the score chart.
+    for path in output_paths:
+        if Path(path).name.lower().endswith('_accident_preview.mp4') and Path(path).is_file() and path not in files:
+            files.append(path)
+    return images, files
 
 
 def build_messages(history: list[dict[str, str]], system_prompt: str | None) -> list:

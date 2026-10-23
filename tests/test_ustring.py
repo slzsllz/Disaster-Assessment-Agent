@@ -3,8 +3,11 @@ import importlib.util
 import json
 import math
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -72,6 +75,8 @@ class UStringTests(unittest.TestCase):
         self.assertIn(info['checkpoint_sha256'], infer.BUNDLED_LEGACY_CHECKPOINTS)
         self.assertEqual(result['reliability']['level'], 'unvalidated')
         self.assertTrue(result['meta']['missing_checkpoint_keys'])
+        self.assertEqual(result['meta']['video_preview']['status'],'not_available')
+        self.assertNotIn('video_path',result['outputs'])
 
     def test_unknown_incomplete_checkpoint_is_still_rejected(self):
         model = network.UString(4096, 256, 256, with_saa=False)
@@ -201,6 +206,70 @@ class VideoTests(unittest.TestCase):
             tool.anticipate_traffic_accident()
         with self.assertRaisesRegex(ValueError, 'exactly one'):
             tool.anticipate_traffic_accident(features_path='clip.npz', video_path='clip.mp4')
+
+
+class ProcessedPreviewTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.renderer = infer.local_module('video_preview','video_preview.py')
+        self.video = infer.local_module('video','video_features.py')
+        self.times = np.array([.2,.4,.6])
+        self.values = np.array([[.1,.2,.001],[.8,.3,.002],[.4,.25,.001]])
+        self.boxes = np.array([[[2,3,30,35,.8,0]]]*3)
+        self.frame = np.zeros((48,64,3),np.uint8)
+
+    def frames(self):
+        return ((t,self.frame.copy(),5.) for t in self.times)
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'),'FFmpeg required')
+    def test_processed_clip_is_browser_playable_and_matches_analyzed_frames(self):
+        import cv2
+        path = self.root/'clip_accident_preview.mp4'
+        meta = self.renderer.render_video_preview(self.frames(),self.boxes,self.times,self.values,
+                                                  5.,.5,'upstream_legacy',path)
+        self.assertEqual(meta['status'],'success')
+        self.assertEqual(meta['start_time_s'],.2)
+        self.assertEqual(meta['last_sample_time_s'],.6)
+        self.assertEqual(meta['frame_count'],3)
+        probe = subprocess.run(['ffprobe','-v','error','-count_frames','-select_streams','v:0',
+                                '-show_entries','stream=codec_name,pix_fmt,nb_read_frames,r_frame_rate',
+                                '-of','json',str(path)],check=True,capture_output=True)
+        stream=json.loads(probe.stdout)['streams'][0]
+        self.assertEqual(stream['codec_name'],'h264')
+        self.assertEqual(stream['pix_fmt'],'yuv420p')
+        self.assertEqual(stream['nb_read_frames'],'3')
+        self.assertEqual(stream['r_frame_rate'],'5/1')
+        cap=cv2.VideoCapture(str(path))
+        try:
+            ok,frame=cap.read()
+            self.assertTrue(ok)
+            self.assertGreater(frame.shape[0],self.frame.shape[0])
+            self.assertGreater(np.std(frame[:76]),5)  # Rendered text, rather than an unmodified copy.
+        finally: cap.release()
+        self.assertFalse(list(self.root.glob('*.avi')))
+        self.assertFalse(list(self.root.glob('*.partial.mp4')))
+
+    def test_overlay_uses_only_observed_scores(self):
+        first = self.renderer.annotate_frame(self.frame,self.boxes[0],self.times,self.values,0,.5,'upstream_legacy')
+        future_changed = self.values.copy(); future_changed[1:] = [[.99,.1,.01],[.99,.1,.01]]
+        same = self.renderer.annotate_frame(self.frame,self.boxes[0],self.times,future_changed,0,.5,'upstream_legacy')
+        np.testing.assert_array_equal(first,same)
+        next_frame = self.renderer.annotate_frame(self.frame,self.boxes[1],self.times,self.values,1,.5,'upstream_legacy')
+        self.assertFalse(np.array_equal(first,next_frame))
+
+    def test_preview_failure_is_explicit_and_partial_files_are_removed(self):
+        path=self.root/'clip_accident_preview.mp4'
+        with patch.object(self.renderer.shutil,'which',return_value=None):
+            with self.assertRaisesRegex(RuntimeError,'FFmpeg'):
+                self.renderer.render_video_preview(self.frames(),self.boxes,self.times,self.values,5,.5,'complete',path)
+        with patch.object(self.renderer.shutil,'which',return_value='/usr/bin/ffmpeg'), \
+             patch.object(self.renderer.subprocess,'run',side_effect=subprocess.CalledProcessError(1,'ffmpeg')):
+            with self.assertRaisesRegex(RuntimeError,'encode'):
+                self.renderer.render_video_preview(self.frames(),self.boxes,self.times,self.values,5,.5,'complete',path)
+        self.assertFalse(path.exists())
+        self.assertFalse(list(self.root.glob('*.avi')))
 
 
 if __name__ == '__main__':

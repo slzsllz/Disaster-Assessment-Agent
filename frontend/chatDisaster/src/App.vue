@@ -283,6 +283,7 @@ function renderMarkdown(value) {
 
 function outputFileLabel(name = '') {
   const lower = String(name).toLowerCase()
+  if (lower.endsWith('_accident_preview.mp4')) return '交通事故分析预览视频'
   if (lower.includes('damage_overlay')) return '建筑损坏叠加可视化图'
   if (lower.includes('building_mask')) return '建筑物检测掩膜图'
   if (lower.includes('damage_mask')) return '建筑损坏等级掩膜图'
@@ -1057,7 +1058,7 @@ onMounted(async () => {
                 :class="{ image: file.preview && !isVideoFile(file), video: isVideoFile(file) }"
               >
                 <VideoAttachment v-if="isVideoFile(file)" :src="file.preview || file.url" :name="file.name"
-                  :download-url="file.url || file.preview" :active="currentPage === 'chat'" />
+                  :download-url="file.url || file.preview" :active="currentPage === 'chat'" :original="message.role === 'user'" />
                 <img v-else-if="file.preview" :src="file.preview" :alt="file.name" />
                 <a
                   v-else-if="file.url"
