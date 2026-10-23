@@ -5,7 +5,7 @@ from functools import wraps
 import importlib.util
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 try:
     from fastmcp import FastMCP
@@ -22,8 +22,14 @@ TOOL_DESCRIPTION = """
 Anticipate traffic accidents from a dashcam video_path or precomputed features_path using UString.
 Supply exactly one input. Raw video uses bundled KITTI Cascade R-CNN and VGG16 weights.
 Input features_path must contain data=(T,20,4096) and det=(T,19,4 or 6), 1<=T<=100.
+model_profile=auto matches raw video to CCD/crash weights because the video extractor follows
+the upstream CCD demo (default 10 FPS and 50 sampled frames). Tagged feature caches reuse
+their model_profile; untagged old NPZ defaults to DAD (20 FPS, 100 frames) for compatibility.
+Explicit model_profile can be ccd, dad or a3d. Explicit weights_path is always honored;
+recognized explicit weights select their profile defaults when model_profile is auto.
+Selection depends on feature provenance, never on whether a checkpoint scores an example higher.
 Standalone images and remote-sensing imagery are not supported.
-For video, start_time selects the clip offset in seconds; max_frames (1..100, default 100)
+For video, start_time selects the clip offset in seconds; max_frames (1..100, profile default)
 limits sampled frames. Only the selected clip is analyzed, not necessarily the whole video.
 Sampling fps is capped at source FPS. Returned timestamps refer to the original video.
 feature_batch_size controls VGG crop batch size (1..20, default 4).
@@ -37,7 +43,7 @@ Unknown incomplete checkpoints still raise an error. Set allow_legacy_checkpoint
 explicitly requested experiments; that mode returns status=experimental with random recurrence.
 Complete weights_path returns status=success, still subject to the stated validation limits.
 output_dir is relative to the tool temp directory. device supports cpu or cuda:0 (CPU fallback).
-fps is feature sampling rate (DAD default 20), threshold is a score cutoff (default 0.5),
+fps is the feature sampling rate (profile default when omitted), threshold is a score cutoff (default 0.5),
 mc_samples is Bayesian sample count (2..100), seed controls repeatability.
 Returns per-frame accident scores, aleatoric/epistemic uncertainty, threshold crossing time,
 CSV curve, PNG visualization, summary path, and reliability metadata.
@@ -47,6 +53,9 @@ ROI boxes are feature proposals, not accident locations. The clip has no audio a
 include unprocessed video frames. Features-only input cannot generate a video without source frames.
 If meta.video_preview.status=error, report its reason; scores and charts remain available.
 Scores are not calibrated probabilities; crossing time is not accident time or lead time.
+threshold_exceeded=False means only that model scores stayed below the cutoff; it MUST NOT be
+reported as "no accident". assessment.accident_presence remains undetermined by this model;
+describe visible evidence separately and preserve uncertainty even for an above-threshold score.
 Explain findings and limitations first; leave output paths in the tool result.
 """
 
@@ -70,17 +79,18 @@ def anticipate_traffic_accident(
     output_dir: str = 'traffic_accident_anticipation',
     weights_path: Optional[str] = None,
     device: str = 'cuda:0',
-    fps: float = 20.0,
+    fps: Optional[float] = None,
     threshold: float = 0.5,
     mc_samples: int = 10,
     seed: int = 0,
     allow_legacy_checkpoint: bool = False,
     video_path: Optional[str] = None,
     start_time: float = 0.0,
-    max_frames: int = 100,
+    max_frames: Optional[int] = None,
     feature_batch_size: int = 4,
     detector_weights: Optional[str] = None,
     vgg_weights: Optional[str] = None,
+    model_profile: Literal['auto', 'ccd', 'dad', 'a3d'] = 'auto',
 ) -> dict:
     if bool(features_path) == bool(video_path):
         raise ValueError('Supply exactly one of video_path or features_path.')
@@ -93,7 +103,7 @@ def anticipate_traffic_accident(
         device=device, fps=fps, threshold=threshold, mc_samples=mc_samples, seed=seed,
         allow_legacy_checkpoint=allow_legacy_checkpoint, start_time=start_time,
         max_frames=max_frames, feature_batch_size=feature_batch_size,
-        detector_weights=detector_weights, vgg_weights=vgg_weights,
+        detector_weights=detector_weights, vgg_weights=vgg_weights, model_profile=model_profile,
     )
     result['task'] = 'traffic_accident_anticipation'
     summary_path = out_dir / 'summary.json'
@@ -124,14 +134,15 @@ if __name__ == '__main__':
     group.add_argument('--features')
     group.add_argument('--video')
     parser.add_argument('--start-time', type=float, default=0.)
-    parser.add_argument('--max-frames', type=int, default=100)
+    parser.add_argument('--max-frames', type=int)
     parser.add_argument('--feature-batch-size', type=int, default=4)
     parser.add_argument('--detector-weights')
     parser.add_argument('--vgg-weights')
     parser.add_argument('--output', default='traffic_accident_anticipation')
     parser.add_argument('--weights')
+    parser.add_argument('--model-profile', choices=('auto', 'ccd', 'dad', 'a3d'), default='auto')
     parser.add_argument('--device', default='cuda:0')
-    parser.add_argument('--fps', type=float, default=20)
+    parser.add_argument('--fps', type=float)
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--mc-samples', type=int, default=10)
     parser.add_argument('--seed', type=int, default=0)
@@ -144,7 +155,7 @@ if __name__ == '__main__':
             args.threshold, args.mc_samples, args.seed, args.allow_legacy_checkpoint,
             video_path=args.video, start_time=args.start_time, max_frames=args.max_frames,
             feature_batch_size=args.feature_batch_size, detector_weights=args.detector_weights,
-            vgg_weights=args.vgg_weights,
+            vgg_weights=args.vgg_weights, model_profile=args.model_profile,
         ), indent=2, ensure_ascii=False))
     else:
         if mcp is None:

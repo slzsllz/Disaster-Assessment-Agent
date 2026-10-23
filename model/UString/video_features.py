@@ -95,7 +95,8 @@ def extract_video(path, detector, extractor, device, output_dir, fps=20.,
     path_out = Path(output_dir) / (Path(path).stem + '_features.npz')
     path_out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path_out, data=np.asarray(features), det=np.asarray(detections),
-                        timestamps_s=np.asarray(timestamps), fps=effective_fps)
+                        timestamps_s=np.asarray(timestamps), fps=effective_fps,
+                        model_profile=np.asarray('ccd'), feature_pipeline=np.asarray('ustring_ccd_vgg16_demo_v1'))
     preview = Path(output_dir) / (Path(path).stem + '_preview.jpg')
     for box in detections[0]:
         cv2.rectangle(first_frame, tuple(box[:2].astype(int)), tuple(box[2:4].astype(int)), (0, 255, 0), 1)

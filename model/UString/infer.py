@@ -20,6 +20,51 @@ BUNDLED_LEGACY_CHECKPOINTS = {
     'd1a5c8954f4012bf036d8efb49718bb04baaa5dc102d2730a35d0c1e7342a776': 'crash_vgg16',
 }
 UPSTREAM_RECURRENT_SEED = 123
+MODEL_PROFILES = {
+    'ccd': {'checkpoint': 'final_model_crash_vgg16.pth', 'fps': 10., 'max_frames': 50},
+    'dad': {'checkpoint': 'final_model_dad_vgg16-new.pth', 'fps': 20., 'max_frames': 100},
+    'a3d': {'checkpoint': 'final_model_a3d_vgg16.pth', 'fps': 20., 'max_frames': 100},
+}
+RELEASE_PROFILES = {'crash_vgg16': 'ccd', 'dad_vgg16-new': 'dad', 'dad_vgg16': 'dad', 'a3d_vgg16': 'a3d'}
+
+
+def checkpoint_fingerprint(weights):
+    digest = hashlib.sha256()
+    with Path(weights).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def resolve_model_settings(input_paths, weights_path=None, model_profile='auto'):
+    """Choose the training domain from the pipeline/metadata, never from prediction scores."""
+    if model_profile not in ('auto', *MODEL_PROFILES):
+        raise ValueError('model_profile must be auto, ccd, dad or a3d.')
+    feature_profile = 'ccd' if 'video' in input_paths else None
+    if 'features' in input_paths:
+        if Path(input_paths['features']).suffix.lower() != '.npz':
+            raise ValueError('Features must be a .npz file, not raw video; use input_paths["video"].')
+        with np.load(input_paths['features'], allow_pickle=False) as data:
+            if 'model_profile' in data:
+                value = np.asarray(data['model_profile'])
+                if value.shape != () or str(value.item()) not in MODEL_PROFILES:
+                    raise ValueError('NPZ model_profile must be a scalar ccd, dad or a3d string.')
+                feature_profile = str(value.item())
+    known_weights_profile = None
+    if weights_path:
+        release = BUNDLED_LEGACY_CHECKPOINTS.get(checkpoint_fingerprint(weights_path))
+        known_weights_profile = RELEASE_PROFILES.get(release)
+    if model_profile != 'auto':
+        profile, reason = model_profile, 'explicit_model_profile'
+    elif known_weights_profile:
+        profile, reason = known_weights_profile, 'explicit_known_weights'
+    elif feature_profile:
+        profile, reason = feature_profile, 'video_ccd_demo_pipeline' if 'video' in input_paths else 'feature_metadata'
+    else:
+        profile, reason = 'dad', 'untagged_features_legacy_dad_default'
+    weights = Path(weights_path) if weights_path else ROOT / 'weights/ustring' / MODEL_PROFILES[profile]['checkpoint']
+    return weights, {'requested_profile': model_profile, 'profile': profile, 'reason': reason,
+                     'feature_profile': feature_profile, 'weights_overridden': bool(weights_path)}
 
 
 def load_checkpoint(model, weights, network, allow_legacy=False):
@@ -31,11 +76,7 @@ def load_checkpoint(model, weights, network, allow_legacy=False):
     initialization in the current runtime; it does not recover trained parameters
     or establish equivalence to the original PyTorch 1.x runtime.
     """
-    digest = hashlib.sha256()
-    with Path(weights).open('rb') as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-            digest.update(chunk)
-    fingerprint = digest.hexdigest()
+    fingerprint = checkpoint_fingerprint(weights)
     checkpoint = torch.load(weights, map_location='cpu', weights_only=False)
     state = checkpoint.get('model', checkpoint)
     state = {k: v for k, v in state.items() if not k.startswith(('predictor_aux.', 'self_aggregation.'))}
@@ -112,13 +153,20 @@ def load_features(path):
 
 def predict(input_paths: dict, weights_path: str = None, output_dir: str = './output',
             device: str = 'cuda:0', **kwargs) -> dict:
-    fps = float(kwargs.get('fps', 20.))
+    if len(input_paths) != 1 or not set(input_paths) <= {'video', 'features'}:
+        raise ValueError('Supply exactly one of input_paths.video or input_paths.features.')
+    source = Path(next(iter(input_paths.values())))
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    weights, selection = resolve_model_settings(input_paths, weights_path, kwargs.get('model_profile', 'auto'))
+    defaults = MODEL_PROFILES[selection['profile']]
+    fps = float(defaults['fps'] if kwargs.get('fps') is None else kwargs['fps'])
     threshold = float(kwargs.get('threshold', .5))
     samples = kwargs.get('mc_samples', 10)
     seed = kwargs.get('seed', 0)
     legacy = kwargs.get('allow_legacy_checkpoint', False)
     start = float(kwargs.get('start_time', 0.))
-    count = kwargs.get('max_frames', 100)
+    count = defaults['max_frames'] if kwargs.get('max_frames') is None else kwargs['max_frames']
     batch = kwargs.get('feature_batch_size', 4)
     if not np.isfinite(fps) or fps <= 0 or not 0 <= threshold <= 1:
         raise ValueError('fps must be positive and finite; threshold must be within [0,1].')
@@ -128,16 +176,10 @@ def predict(input_paths: dict, weights_path: str = None, output_dir: str = './ou
             raise ValueError(f'{name} must be an integer within [{low},{high}].')
     if not np.isfinite(start) or start < 0 or not isinstance(legacy, bool):
         raise ValueError('start_time must be finite and nonnegative; allow_legacy_checkpoint must be boolean.')
-    if len(input_paths) != 1 or not set(input_paths) <= {'video', 'features'}:
-        raise ValueError('Supply exactly one of input_paths.video or input_paths.features.')
-    source = Path(next(iter(input_paths.values())))
-    if not source.is_file():
-        raise FileNotFoundError(source)
     requested_device = device
     if device.startswith('cuda') and not torch.cuda.is_available():
         device = 'cpu'
     target = torch.device(device)
-    weights = Path(weights_path) if weights_path else ROOT / 'weights/ustring/final_model_dad_vgg16-new.pth'
     network = local_module('network', 'model/__init__.py', package=True)
     devices = [target.index if target.index is not None else torch.cuda.current_device()] if target.type == 'cuda' else []
     out_dir = Path(output_dir).resolve()
@@ -149,6 +191,13 @@ def predict(input_paths: dict, weights_path: str = None, output_dir: str = './ou
                 torch.cuda.manual_seed(seed)
         model = network.UString(4096, 256, 256, with_saa=False)
         checkpoint_info = load_checkpoint(model, weights, network, legacy)
+        selection['checkpoint_profile'] = RELEASE_PROFILES.get(
+            BUNDLED_LEGACY_CHECKPOINTS.get(checkpoint_info['checkpoint_sha256']), 'custom')
+        selection['warnings'] = []
+        if selection['feature_profile'] and selection['checkpoint_profile'] not in (selection['feature_profile'], 'custom'):
+            selection['warnings'].append('Feature pipeline and checkpoint training domain differ; scores may be unreliable.')
+        if 'features' in input_paths and not selection['feature_profile']:
+            selection['warnings'].append('Untagged features: verify their training-domain compatibility explicitly.')
         missing = checkpoint_info['missing_keys']
         feature_path = source
         if 'video' in input_paths:
@@ -225,6 +274,9 @@ def predict(input_paths: dict, weights_path: str = None, output_dir: str = './ou
     return {
         'model_name': 'UString', 'disaster_type': 'traffic_accident', 'task_type': 'anticipation',
         'status': {'experimental': 'experimental', 'upstream_legacy': 'legacy_compatible'}.get(mode, 'success'),
+        'assessment': {'kind': 'model_score_threshold', 'accident_presence': 'undetermined',
+                       'accident_ruled_out': False,
+                       'statement': '模型分数达到阈值，需结合画面复核。' if len(crossing) else '模型分数未达到阈值，不能据此排除事故。'},
         'outputs': {'frame_count': len(values), 'timestamps_s': times.tolist(),
                     'accident_scores': values[:, 0].tolist(), 'aleatoric_uncertainty': values[:, 1].tolist(),
                     'epistemic_uncertainty': values[:, 2].tolist(), 'max_accident_score': float(values[:, 0].max()),
@@ -234,6 +286,7 @@ def predict(input_paths: dict, weights_path: str = None, output_dir: str = './ou
                     **({'video_path': video_preview['path']} if video_preview['status'] == 'success' else {}),
                     **{k: video_meta[k] for k in ('feature_path', 'preview_path') if k in video_meta}},
         'meta': {'weights': str(weights), 'device': str(target), 'requested_device': requested_device,
+                 'model_selection': selection,
                  'fps': effective_fps, 'mc_samples': samples, 'seed': seed,
                  'missing_checkpoint_keys': missing, 'checkpoint_compatibility': checkpoint_info,
                  'video': video_meta, 'video_preview': video_preview, 'resolution_m': None,
@@ -244,7 +297,8 @@ def predict(input_paths: dict, weights_path: str = None, output_dir: str = './ou
                                  'with upstream seed 123. This is legacy compatibility, not recovered trained weights '
                                  'or a verified reproduction of the original PyTorch runtime. '}.get(mode, '')) +
             'Video detector port has not been benchmarked against the original runtime. '
-            'Scores are not calibrated probabilities; threshold time is not accident time or lead time.'},
+            'Scores are not calibrated probabilities; threshold time is not accident time or lead time. '
+            'A below-threshold score does not mean no accident occurred.'},
     }
 
 
@@ -254,11 +308,12 @@ if __name__ == '__main__':
     group.add_argument('--video')
     group.add_argument('--features')
     parser.add_argument('--weights')
+    parser.add_argument('--model-profile', choices=('auto', 'ccd', 'dad', 'a3d'), default='auto')
     parser.add_argument('--output', default=str(ROOT / 'output'))
     parser.add_argument('--device', default='cuda:0')
-    parser.add_argument('--fps', type=float, default=20.)
+    parser.add_argument('--fps', type=float)
     parser.add_argument('--start-time', type=float, default=0.)
-    parser.add_argument('--max-frames', type=int, default=100)
+    parser.add_argument('--max-frames', type=int)
     parser.add_argument('--mc-samples', type=int, default=10)
     parser.add_argument('--threshold', type=float, default=.5)
     parser.add_argument('--seed', type=int, default=0)

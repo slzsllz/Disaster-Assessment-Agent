@@ -31,7 +31,7 @@ UString/
 pip install -r model/UString/requirements.txt
 python agent/tools/TrafficAccidentAnticipation.py \
   --video /path/to/dashcam.mp4 --temp_dir tmp/ustring_run \
-  --device cuda:0 --fps 20 --max-frames 100
+  --device cuda:0 --model-profile auto
 ```
 
 直接调用模型：
@@ -43,9 +43,8 @@ result = predict(
     {"video": "/path/to/dashcam.mp4"},
     output_dir="model/UString/output",
     device="cuda:0",
-    fps=20.0,
+    model_profile="auto",
     start_time=0.0,
-    max_frames=100,
 )
 ```
 
@@ -58,7 +57,15 @@ CUDA 不可用时回退 CPU。CPU 完整视频推理较慢。
 流程：OpenCV 解码 → KITTI Cascade R-CNN 目标框 → 每帧 19 个区域 →
 VGG16 整帧和区域特征 → UString 事故分数与不确定性。
 
-- 默认 DAD/VGG16-new 权重，20 FPS、最多 100 帧。
+- `model_profile=auto` 根据输入来源匹配模型，不通过分数高低选择权重：
+  原始视频复用上游 **CCD Demo** 的 KITTI/VGG16 特征流程，因此默认使用
+  `final_model_crash_vgg16.pth`（CCD），10 FPS、最多 50 帧。
+  新视频特征缓存写入 `model_profile=ccd`，再次输入 NPZ 时自动保持 CCD。
+  旧无标记 NPZ 兼容 DAD/VGG16-new 默认（20 FPS、最多 100 帧）；如果已知它来自
+  CCD 视频提取，应显式指定 `model_profile=ccd`，不能仅凭同为 4096 维就认为域相同。
+- 可显式选择 `model_profile=ccd|dad|a3d`；指定 `weights_path` 始终优先保留用户权重。
+  auto 模式下，已识别的显式权重按内容指纹确定采样默认配置；显式传入的 fps/max_frames 优先于配置默认值。
+  `meta.model_selection` 记录选择依据、实际 checkpoint 模型域、是否覆盖权重及域不匹配警告。
 - `start_time` 是原视频秒数偏移，`max_frames` 范围 1–100。
 - **每次只分析选定片段，不能把结果解释为完整长视频的结论**。
   长视频可分段调用，片段之间重置循环状态。
@@ -70,7 +77,7 @@ VGG16 整帧和区域特征 → UString 事故分数与不确定性。
 
 原始 NPZ 要求 `data=(T,20,4096)`、`det=(T,19,4或6)`，`1<=T<=100`。
 第 0 个特征为整帧，其余 19 个与框一一对应；框前四列是像素 xyxy。
-缓存附带 `timestamps_s` 和 `fps`。VGG16 保留原 demo 的 Resize(256)、
+缓存附带 `timestamps_s`、`fps`、`model_profile` 和 `feature_pipeline`。VGG16 保留原 demo 的 Resize(256)、
 CenterCrop(224)、ToTensor 预处理及倒数第二层 4096 维特征，不额外做 Normalize。
 
 ## 权重与可靠性限制
@@ -118,6 +125,12 @@ ROIAlign 坐标参照 [MMDetection v1.1.0 实现](https://github.com/open-mmlab/
 
 分数不是校准概率，首次越阈值时间不是事故发生时刻或经过验证的提前量。
 没有本地评测指标，`reliability.metric` 留空。
+`threshold_exceeded=false` 仅表示未超过分数阈值，不是“没有事故”。
+`assessment` 明确返回 `accident_presence=undetermined`、`accident_ruled_out=false`，
+即使超过阈值也需要画面与标注复核。单个事故样本或合成输入不能证明准确率或预警提前量。
+
+2026-10-23 对用户 `data/000001.mp4` 的诊断与修复见
+[视频误判诊断](../../docs/TRAFFIC_000001_DIAGNOSIS.md)。
 
 ## 工具与输出
 
@@ -147,7 +160,7 @@ MCP server：`TrafficAccidentAnticipation`，函数：`anticipate_traffic_accide
 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m unittest discover -s tests -p test_ustring.py -v
 ```
 
-2026-10-23 验证：16 项 UString 测试、7 项系统提示词回归及 2 项处理后视频附件测试通过。
+2026-10-23 验证：20 项 UString 测试、7 项系统提示词回归及 2 项处理后视频附件测试通过。
 使用真实权重，通过 MCP 视频入口在 CPU 上完成两帧合成视频推理，未传实验开关，
 返回 `legacy_compatible`；CSV、PNG、NPZ、预览图、H.264 处理后视频和 summary 均生成，
 视频/缓存推理分数完全一致。处理后视频帧数与实际采样数一致。

@@ -78,6 +78,51 @@ class UStringTests(unittest.TestCase):
         self.assertEqual(result['meta']['video_preview']['status'],'not_available')
         self.assertNotIn('video_path',result['outputs'])
 
+    def test_raw_video_selection_uses_upstream_ccd_pipeline(self):
+        weights, selection = infer.resolve_model_settings({'video':'dad_named_but_raw.mp4'})
+        self.assertEqual(weights.name,'final_model_crash_vgg16.pth')
+        self.assertEqual(selection['profile'],'ccd')
+        self.assertEqual(selection['reason'],'video_ccd_demo_pipeline')
+        self.assertEqual(selection['feature_profile'],'ccd')
+
+    def test_tagged_features_reuse_ccd_while_untagged_features_remain_dad(self):
+        options=dict(device='cpu',output_dir=str(self.root),mc_samples=2)
+        old=infer.predict({'features':str(self.features)},**options)
+        self.assertEqual(old['meta']['model_selection']['checkpoint_profile'],'dad')
+        np.savez(self.features,data=np.zeros((3,20,4096),np.float32),det=np.zeros((3,19,6),np.float32),
+                 model_profile=np.asarray('ccd'),fps=10.)
+        tagged=infer.predict({'features':str(self.features)},**options)
+        explicit=infer.predict({'features':str(self.features)},model_profile='ccd',**options)
+        self.assertEqual(tagged['meta']['model_selection']['reason'],'feature_metadata')
+        self.assertEqual(tagged['meta']['model_selection']['checkpoint_profile'],'ccd')
+        self.assertEqual(tagged['outputs']['timestamps_s'],[0,.1,.2])
+        self.assertEqual(tagged['outputs']['accident_scores'],explicit['outputs']['accident_scores'])
+
+    def test_explicit_weights_and_profiles_are_honored(self):
+        dad=infer.ROOT/'weights/ustring/final_model_dad_vgg16-new.pth'
+        weights, selection=infer.resolve_model_settings({'video':'clip.mp4'},str(dad))
+        self.assertEqual(weights,dad)
+        self.assertEqual(selection['profile'],'dad')
+        self.assertEqual(selection['reason'],'explicit_known_weights')
+        weights, selection=infer.resolve_model_settings({'features':str(self.features)},model_profile='a3d')
+        self.assertEqual(weights.name,'final_model_a3d_vgg16.pth')
+        self.assertEqual(selection['reason'],'explicit_model_profile')
+        custom=self.root/'custom.pth';custom.write_bytes(b'custom model')
+        weights, selection=infer.resolve_model_settings({'video':'clip.mp4'},str(custom))
+        self.assertEqual(weights,custom)
+        self.assertTrue(selection['weights_overridden'])
+        with self.assertRaisesRegex(ValueError,'model_profile'):
+            infer.resolve_model_settings({'video':'clip.mp4'},model_profile='pick_highest_score')
+
+    def test_score_threshold_never_becomes_an_accident_presence_verdict(self):
+        for score in (.01,.99):
+            values=torch.tensor([[score,.1,.001]]*3)
+            with patch.object(network.UString,'forward',return_value=values):
+                result=infer.predict({'features':str(self.features)},device='cpu',output_dir=str(self.root),mc_samples=2)
+            self.assertEqual(result['outputs']['threshold_exceeded'],score>=.5)
+            self.assertEqual(result['assessment']['accident_presence'],'undetermined')
+            self.assertFalse(result['assessment']['accident_ruled_out'])
+
     def test_unknown_incomplete_checkpoint_is_still_rejected(self):
         model = network.UString(4096, 256, 256, with_saa=False)
         weights = self.root / 'final_model_dad_vgg16-new.pth'
