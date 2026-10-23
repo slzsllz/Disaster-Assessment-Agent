@@ -1,6 +1,7 @@
 """Numerical and integration checks; synthetic features are not accuracy tests."""
 import importlib.util
 import json
+import math
 from pathlib import Path
 import tempfile
 import unittest
@@ -62,9 +63,57 @@ class UStringTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'finite'):
             infer.load_features(self.features)
 
-    def test_bundled_checkpoint_rejected_by_default(self):
+    def test_bundled_checkpoint_works_without_experimental_opt_in(self):
+        result = infer.predict({'features': str(self.features)}, device='cpu', output_dir=str(self.root), mc_samples=2)
+        self.assertEqual(result['status'], 'legacy_compatible')
+        info = result['meta']['checkpoint_compatibility']
+        self.assertEqual(info['mode'], 'upstream_legacy')
+        self.assertEqual(info['recurrent_seed'], 123)
+        self.assertIn(info['checkpoint_sha256'], infer.BUNDLED_LEGACY_CHECKPOINTS)
+        self.assertEqual(result['reliability']['level'], 'unvalidated')
+        self.assertTrue(result['meta']['missing_checkpoint_keys'])
+
+    def test_unknown_incomplete_checkpoint_is_still_rejected(self):
+        model = network.UString(4096, 256, 256, with_saa=False)
+        weights = self.root / 'final_model_dad_vgg16-new.pth'
+        torch.save({'model': {k: v for k, v in model.state_dict().items() if not k.startswith('rnn.')}}, weights)
         with self.assertRaisesRegex(ValueError, 'missing recurrent'):
-            infer.predict({'features': str(self.features)}, device='cpu')
+            infer.predict({'features': str(self.features)}, weights_path=str(weights), device='cpu')
+
+    def test_upstream_recurrence_matches_independent_initialization_and_ignores_sampling_seed(self):
+        # Reference: official Models.py UString.__init__, Graph_GRU_GCN.__init__, utils.glorot.
+        # Plain lists in the reference deliberately keep these layers out of state_dict/optimizer.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(123)
+            torch.nn.Linear(4096, 256)  # phi_x is constructed before the two encoders and GRU.
+            for _ in range(2):
+                bound = math.sqrt(6 / (512 + 256))
+                torch.empty(512, 256).uniform_(-bound, bound)
+            reference = {}
+            for name, inputs in [('xz',768), ('hz',256), ('xr',768), ('hr',256), ('xh',768), ('hh',256)]:
+                bound = math.sqrt(6 / (inputs + 256))
+                reference[f'weight_{name}.0.weight'] = torch.empty(inputs, 256).uniform_(-bound, bound)
+                reference[f'weight_{name}.0.bias'] = torch.zeros(256)
+            for seed in (0, 42):
+                torch.manual_seed(seed)
+                model = network.UString(4096,256,256,with_saa=False)
+                before = torch.random.get_rng_state().clone()
+                info = infer.load_checkpoint(model, infer.ROOT/'weights/ustring/final_model_dad_vgg16-new.pth', network)
+                torch.testing.assert_close(torch.random.get_rng_state(), before)
+                self.assertEqual(info['recurrent_seed'],123)
+                for key, tensor in model.rnn.state_dict().items():
+                    torch.testing.assert_close(tensor, reference[key], rtol=0, atol=0)
+
+    def test_all_bundled_releases_are_recognized_by_content(self):
+        for weights in sorted((infer.ROOT/'weights/ustring').glob('*.pth')):
+            with self.subTest(weights=weights.name):
+                model = network.UString(4096,256,256,with_saa=False)
+                info = infer.load_checkpoint(model, weights, network)
+                self.assertEqual(info['mode'],'upstream_legacy')
+                if weights.name == 'final_model_dad_vgg16.pth':
+                    saved = torch.load(weights,map_location='cpu',weights_only=False)['model']
+                    torch.testing.assert_close(model.enc_gcn1.weight,saved['enc_layer1.weight'])
+                    self.assertEqual(info['renamed_keys']['enc_layer1.weight'],'enc_gcn1.weight')
 
     def test_experimental_tool_outputs_and_repeatability(self):
         original = tool.TEMP_DIR
@@ -98,6 +147,7 @@ class UStringTests(unittest.TestCase):
                                device='cpu', output_dir=str(self.root), mc_samples=2)
         self.assertEqual(result['status'], 'success')
         self.assertEqual(result['meta']['missing_checkpoint_keys'], [])
+        self.assertEqual(result['meta']['checkpoint_compatibility']['mode'], 'complete')
         state = model.state_dict()
         del state['phi_x.0.bias']
         torch.save({'model': state}, weights)

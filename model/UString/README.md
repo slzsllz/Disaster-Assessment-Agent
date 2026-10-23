@@ -30,7 +30,7 @@ UString/
 pip install -r model/UString/requirements.txt
 python agent/tools/TrafficAccidentAnticipation.py \
   --video /path/to/dashcam.mp4 --temp_dir tmp/ustring_run \
-  --device cuda:0 --fps 20 --max-frames 100 --allow-legacy-checkpoint
+  --device cuda:0 --fps 20 --max-frames 100
 ```
 
 直接调用模型：
@@ -45,7 +45,6 @@ result = predict(
     fps=20.0,
     start_time=0.0,
     max_frames=100,
-    allow_legacy_checkpoint=True,
 )
 ```
 
@@ -77,12 +76,38 @@ CenterCrop(224)、ToTensor 预处理及倒数第二层 4096 维特征，不额�
 
 四份现有 UString checkpoint 都没有 `rnn.*` 参数：原实现使用普通 list 保存图 GRU，
 未注册到 PyTorch，因而未进入标准模型参数保存和优化器参数列表。
-新版修正为 ModuleList，但不能由现有权重恢复缺失参数。
+新版修正为 ModuleList。当前对这四份随附权重按文件内容 SHA256 识别后，自动按照
+上游 `main.py` / `demo.py` 的默认种子 **123** 和模型构造顺序，重建原本未保存、未优化的
+循环层；无须传入 `allow_legacy_checkpoint=True`，视频上传可直接运行。
+不是只初始化一个孤立 GRU：必须先消耗 `phi_x` 与两个 encoder 的初始化随机数，再构造循环层。
+循环初始化固定为 123，用户 `seed` 仍控制采样与特征提取，不会改变该兼容层。
+嵌套 RNG 上下文保证不影响调用方随机状态。
 
-默认 `allow_legacy_checkpoint=False`，缺失参数明确报错。
-显式开启实验兼容模式后使用固定种子随机初始化循环参数，返回 `status=experimental`，
-列出缺失参数，结果图也标注实验状态。**该模式可用于工具链联调，不能当成可靠事故预测。**
-正式使用需要与结构匹配的完整 checkpoint，并经过数据集验证。
+兼容结果返回 **`status=legacy_compatible`**，`reliability.level=unvalidated`，图中标注
+`legacy compatibility, unvalidated`。`meta.checkpoint_compatibility` 包含模式、权重 SHA256、
+种子、循环参数来源；`missing_checkpoint_keys` 保留文件原本缺失的键。
+这是在当前 PyTorch 运行时重建上游初始化行为，**不是恢复训练参数，也未验证与旧 PyTorch 1.x
+环境或论文精度完全一致**。准确率仍须用真实数据集评估。
+
+未知、被修改或只缺部分循环参数的权重不会自动通过兼容检查；文件同名也不能绕过校验。
+对这些文件，默认仍明确报错。只有显式开启 `allow_legacy_checkpoint=True` 才使用用户种子
+保留随机循环层并返回 `status=experimental`；仅用于实验联调。
+完整结构权重直接加载，返回 `status=success`，不覆盖已有循环参数。
+较早的 `dad_vgg16` 文件还使用 `enc_layer1/2` 命名；仅对其已识别的文件映射为
+`enc_gcn1/2`，映射记录在 `renamed_keys` 中。
+
+识别的随附发行文件（SHA256）：
+
+| 文件 | SHA256 |
+| --- | --- |
+| final_model_dad_vgg16-new.pth | `85158182a55add46fe47cf7a4d0bcd7a316f8a6aa6f18b908d720a0e88af4b53` |
+| final_model_dad_vgg16.pth | `88f82c3ec9f82945b1fdb5101928e96a517534c2e27b0e0932988fda2756ac41` |
+| final_model_a3d_vgg16.pth | `1afbf5b95eb604cc78d7a81f286d2112b9feb7445b2b48ced22c2d0001fb16d8` |
+| final_model_crash_vgg16.pth | `d1a5c8954f4012bf036d8efb49718bb04baaa5dc102d2730a35d0c1e7342a776` |
+
+上游依据：[循环层列表与模型构造顺序](https://github.com/Cogito2012/UString/blob/master/src/Models.py)、
+[默认种子](https://github.com/Cogito2012/UString/blob/master/main.py)、
+[Demo 种子设置](https://github.com/Cogito2012/UString/blob/master/demo.py)。
 
 检测器用当前 PyTorch/torchvision 实现加载原有权重，参数严格匹配；移除了旧 MMDetection、
 mmcv 和自定义 CUDA 扩展依赖。适配保留原配置的 RGB 均值/方差、1696×512 保比例缩放、
@@ -109,8 +134,11 @@ MCP server：`TrafficAccidentAnticipation`，函数：`anticipate_traffic_accide
 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m unittest discover -s tests -p test_ustring.py -v
 ```
 
-已用真实权重完成 CPU 上两帧合成视频的完整工具链测试；合成输入仅验证运行和接口，
-不验证真实交通事故预测能力。测试结果在项目 `tmp/ustring_video_smoke/`。
+2026-10-23 验证：13 项 UString 测试及 7 项系统提示词回归测试通过。
+使用真实权重，通过 MCP 视频入口在 CPU 上完成两帧合成视频推理，未传实验开关，
+返回 `legacy_compatible`；CSV、PNG、NPZ、预览图和 summary 均生成，视频/缓存推理分数完全一致。
+本机冒烟测试约 20 秒，结果位于项目 `tmp/ustring_checkpoint_fix/`。
+合成输入仅验证运行和接口，不验证真实交通事故预测能力。
 
 ## 引用
 

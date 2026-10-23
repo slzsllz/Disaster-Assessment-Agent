@@ -1,5 +1,6 @@
 """Unified UString inference for raw video or precomputed DAD/VGG16 features."""
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -10,6 +11,64 @@ import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parent
+
+# Released files already bundled with this project. Match content, never just a filename.
+BUNDLED_LEGACY_CHECKPOINTS = {
+    '85158182a55add46fe47cf7a4d0bcd7a316f8a6aa6f18b908d720a0e88af4b53': 'dad_vgg16-new',
+    '88f82c3ec9f82945b1fdb5101928e96a517534c2e27b0e0932988fda2756ac41': 'dad_vgg16',
+    '1afbf5b95eb604cc78d7a81f286d2112b9feb7445b2b48ced22c2d0001fb16d8': 'a3d_vgg16',
+    'd1a5c8954f4012bf036d8efb49718bb04baaa5dc102d2730a35d0c1e7342a776': 'crash_vgg16',
+}
+UPSTREAM_RECURRENT_SEED = 123
+
+
+def load_checkpoint(model, weights, network, allow_legacy=False):
+    """Restore released upstream initialization without accepting arbitrary incomplete weights.
+
+    Upstream Graph_GRU_GCN uses ordinary lists, so its parameters are neither saved
+    nor optimized. Upstream main.py/demo.py initialize the model with seed 123.
+    Replaying the full constructor (including layers before rnn) recreates that
+    initialization in the current runtime; it does not recover trained parameters
+    or establish equivalence to the original PyTorch 1.x runtime.
+    """
+    digest = hashlib.sha256()
+    with Path(weights).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    fingerprint = digest.hexdigest()
+    checkpoint = torch.load(weights, map_location='cpu', weights_only=False)
+    state = checkpoint.get('model', checkpoint)
+    state = {k: v for k, v in state.items() if not k.startswith(('predictor_aux.', 'self_aggregation.'))}
+    renamed = {}
+    if BUNDLED_LEGACY_CHECKPOINTS.get(fingerprint) == 'dad_vgg16':
+        # Earlier released DAD file predates the encoder attribute rename.
+        for old, new in [('enc_layer1.weight', 'enc_gcn1.weight'), ('enc_layer2.weight', 'enc_gcn2.weight')]:
+            if old in state and new not in state:
+                state[new] = state.pop(old)
+                renamed[old] = new
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if unexpected or any(not k.startswith('rnn.') for k in missing):
+        raise ValueError(f'Incompatible checkpoint: missing={missing}, unexpected={unexpected}')
+    info = {'mode': 'complete', 'missing_keys': missing, 'recurrent_seed': None,
+            'recurrent_parameters_source': 'checkpoint', 'checkpoint_sha256': fingerprint,
+            'renamed_keys': renamed}
+    if not missing:
+        return info
+    if allow_legacy:
+        return {**info, 'mode': 'experimental', 'recurrent_parameters_source': 'inference_seed_initialization'}
+    recurrent_keys = {key for key in model.state_dict() if key.startswith('rnn.')}
+    if fingerprint not in BUNDLED_LEGACY_CHECKPOINTS or set(missing) != recurrent_keys:
+        raise ValueError('Checkpoint is missing recurrent rnn parameters and is not a recognized bundled release. '
+                         'Supply complete weights or set allow_legacy_checkpoint=True only for experimental '
+                         'inference with random recurrence.')
+    with torch.random.fork_rng(devices=[]):
+        torch.random.default_generator.manual_seed(UPSTREAM_RECURRENT_SEED)
+        reference = network.UString(4096, 256, 256, with_saa=False)
+        model.rnn.load_state_dict(reference.rnn.state_dict(), strict=True)
+    model.rnn.requires_grad_(False)
+    return {**info, 'mode': 'upstream_legacy', 'recurrent_seed': UPSTREAM_RECURRENT_SEED,
+            'recurrent_parameters_source': 'upstream_seed_initialization', 'checkpoint_sha256': fingerprint,
+            'release': BUNDLED_LEGACY_CHECKPOINTS[fingerprint]}
 
 
 def local_module(name, path, package=False):
@@ -89,15 +148,8 @@ def predict(input_paths: dict, weights_path: str = None, output_dir: str = './ou
             with torch.cuda.device(target):
                 torch.cuda.manual_seed(seed)
         model = network.UString(4096, 256, 256, with_saa=False)
-        checkpoint = torch.load(weights, map_location='cpu', weights_only=True)
-        state = checkpoint.get('model', checkpoint)
-        state = {k: v for k, v in state.items() if not k.startswith(('predictor_aux.', 'self_aggregation.'))}
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        if unexpected or any(not k.startswith('rnn.') for k in missing):
-            raise ValueError(f'Incompatible checkpoint: missing={missing}, unexpected={unexpected}')
-        if missing and not legacy:
-            raise ValueError('Checkpoint is missing recurrent rnn parameters. Supply complete weights or set '
-                             'allow_legacy_checkpoint=True for experimental inference with random recurrence.')
+        checkpoint_info = load_checkpoint(model, weights, network, legacy)
+        missing = checkpoint_info['missing_keys']
         feature_path = source
         if 'video' in input_paths:
             detector_path = Path(kwargs.get('detector_weights') or ROOT / 'weights/cascade_kitti.pth')
@@ -147,7 +199,9 @@ def predict(input_paths: dict, weights_path: str = None, output_dir: str = './ou
     axes[0].plot(times, values[:, 0], label='Accident score')
     axes[0].axhline(threshold, linestyle='--', color='gray')
     axes[0].set_ylim(0, 1)
-    axes[0].set_title('EXPERIMENTAL: missing recurrent weights' if missing else 'UString (unvalidated)')
+    mode = checkpoint_info['mode']
+    axes[0].set_title({'experimental': 'EXPERIMENTAL: missing recurrent weights',
+                       'upstream_legacy': 'UString (legacy compatibility, unvalidated)'}.get(mode, 'UString (unvalidated)'))
     axes[0].legend()
     axes[1].plot(times, values[:, 1], label='Aleatoric')
     axes[1].plot(times, values[:, 2], label='Epistemic')
@@ -158,7 +212,7 @@ def predict(input_paths: dict, weights_path: str = None, output_dir: str = './ou
     crossing = np.flatnonzero(values[:, 0] >= threshold)
     return {
         'model_name': 'UString', 'disaster_type': 'traffic_accident', 'task_type': 'anticipation',
-        'status': 'experimental' if missing else 'success',
+        'status': {'experimental': 'experimental', 'upstream_legacy': 'legacy_compatible'}.get(mode, 'success'),
         'outputs': {'frame_count': len(values), 'timestamps_s': times.tolist(),
                     'accident_scores': values[:, 0].tolist(), 'aleatoric_uncertainty': values[:, 1].tolist(),
                     'epistemic_uncertainty': values[:, 2].tolist(), 'max_accident_score': float(values[:, 0].max()),
@@ -168,10 +222,14 @@ def predict(input_paths: dict, weights_path: str = None, output_dir: str = './ou
                     **{k: video_meta[k] for k in ('feature_path', 'preview_path') if k in video_meta}},
         'meta': {'weights': str(weights), 'device': str(target), 'requested_device': requested_device,
                  'fps': effective_fps, 'mc_samples': samples, 'seed': seed,
-                 'missing_checkpoint_keys': missing, 'video': video_meta, 'resolution_m': None,
+                 'missing_checkpoint_keys': missing, 'checkpoint_compatibility': checkpoint_info,
+                 'video': video_meta, 'resolution_m': None,
                  'input_spec': 'Dashcam video or DAD/VGG16 NPZ: data=(T,20,4096), det=(T,19,4 or 6).'},
         'reliability': {'metric': {}, 'level': 'unvalidated', 'note':
-            ('Missing recurrent weights; seeded random recurrence. Experimental only. ' if missing else '') +
+            ({'experimental': 'Missing recurrent weights; seeded random recurrence. Experimental only. ',
+              'upstream_legacy': 'Recognized upstream checkpoint: unsaved, unoptimized recurrent layers rebuilt '
+                                 'with upstream seed 123. This is legacy compatibility, not recovered trained weights '
+                                 'or a verified reproduction of the original PyTorch runtime. '}.get(mode, '')) +
             'Video detector port has not been benchmarked against the original runtime. '
             'Scores are not calibrated probabilities; threshold time is not accident time or lead time.'},
     }

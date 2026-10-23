@@ -29,10 +29,13 @@ Sampling fps is capped at source FPS. Returned timestamps refer to the original 
 feature_batch_size controls VGG crop batch size (1..20, default 4).
 Optional detector_weights and vgg_weights override bundled files.
 The torchvision detector port is not benchmark-validated against original MMDetection.
-The bundled legacy checkpoint lacks recurrent weights: by default inference raises an error.
-Use a complete weights_path for normal inference. Set allow_legacy_checkpoint=True only when
-experimental inference has been explicitly requested; it uses seeded random recurrent weights
-and returns status=experimental. Never present these outputs as reliable accident predictions.
+Recognized bundled legacy checkpoints are supported automatically after SHA256 verification:
+their unsaved/unoptimized recurrent layers are rebuilt with upstream initialization seed 123.
+This returns status=legacy_compatible and unvalidated reliability, not recovered trained weights
+or verified original-runtime accuracy. No allow_legacy_checkpoint flag is needed for bundled files.
+Unknown incomplete checkpoints still raise an error. Set allow_legacy_checkpoint=True only for
+explicitly requested experiments; that mode returns status=experimental with random recurrence.
+Complete weights_path returns status=success, still subject to the stated validation limits.
 output_dir is relative to the tool temp directory. device supports cpu or cuda:0 (CPU fallback).
 fps is feature sampling rate (DAD default 20), threshold is a score cutoff (default 0.5),
 mc_samples is Bayesian sample count (2..100), seed controls repeatability.
