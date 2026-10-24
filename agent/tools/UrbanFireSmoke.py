@@ -1,7 +1,8 @@
 """MCP bridge to the verified CITY_FIRE_008A YOLOv5l CPU handoff package.
 
 Only the standard library and optional FastMCP are imported in the Agent runtime.
-The PyTorch model runs in its separately configured Python virtual environment.
+The PyTorch model runs in a child process using the current Python by default.
+An independent Python environment may be configured explicitly when needed.
 """
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import uuid
 
 try:
@@ -38,7 +40,7 @@ Don't invent GPS coordinates or infer a real incident from predictions alone.
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--temp_dir", default="tmp/urban_fire_smoke")
 parser.add_argument("--fire-python", default=None,
-                    help="Absolute path to verified 008A Python environment's bin/python")
+                    help="Optional inference Python executable (default: current Python)")
 parser.add_argument("--l-model-dir", default=None, help="Verified extracted 008A l model folder")
 parser.add_argument("--input-root", action="append", default=[],
                     help="Additional trusted input root configured by the server operator")
@@ -112,11 +114,9 @@ def _runtime_python() -> str:
         if local_config.is_file():
             config = json.loads(local_config.read_text(encoding="utf-8"))
             raw = config.get("python_executable") if isinstance(config, dict) else None
-    if not raw or not isinstance(raw, str):
-        raise RuntimeError(
-            "008A runtime not configured: use --fire-python, URBAN_FIRE_CPU_PYTHON, "
-            "or a local model/urban_fire_runtime.json with python_executable"
-        )
+            if not isinstance(raw, str) or not raw.strip():
+                raise ValueError("urban_fire_runtime.json must specify a non-empty python_executable")
+    raw = raw or sys.executable
     path = _project_path(raw)
     if not path.is_absolute() or not path.is_file():
         raise FileNotFoundError("the configured 008A Python executable does not exist")

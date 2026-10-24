@@ -2,10 +2,14 @@ import argparse
 import json
 import math
 import os
+import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+from dotenv import dotenv_values
 
 try:
     from fastmcp import FastMCP
@@ -19,30 +23,42 @@ else:
 mcp = FastMCP() if FastMCP is not None else None
 
 GEO_CONTEXT_TOOL_DESCRIPTION = """
-Query geographic context around a disaster assessment area using ArcGIS REST services.
+Query geographic context around a disaster assessment area. The backend automatically
+uses AMap for domestic centers (including Hong Kong/Macao/Taiwan in the routing data)
+and ArcGIS for foreign centers. Do not select a provider or fall back between them.
+Routing uses an approximate offline land boundary, not authoritative jurisdiction data.
 
 This tool complements disaster-detection tools. It does not detect disasters; it describes
 what is around or inside a georeferenced disaster area, such as address/admin context and
-nearby POIs. If ArcGIS Feature Layer URLs are supplied, it can also query configured
+nearby POIs. For foreign queries, if ArcGIS Feature Layer URLs are supplied, it can query configured
 building, road, administrative boundary, or other vector layers by spatial intersection.
 
 Parameters:
-- raster_path (str | None): Optional georeferenced raster/GeoTIFF path. If provided, its WGS84 bounding box is used.
+- raster_path (str | None): Optional georeferenced raster/GeoTIFF with a declared CRS; its WGS84 bounding box is used.
 - bbox (list[float] | None): Optional WGS84 bbox [min_lon, min_lat, max_lon, max_lat].
 - center (list[float] | None): Optional WGS84 center [lon, lat]. Used for reverse geocoding and as fallback search center.
-- radius_m (float): Search radius in meters when bbox is omitted or too large. Default 1000.
+- radius_m (float): Search radius (1..50000 meters) when bbox is omitted or too large. Default 1000.
 - query_types (list[str] | None): Context types to query. Common values:
   ["hospital", "school", "park", "residential", "building", "road", "shelter", "government"].
-- max_results_per_type (int): Maximum places/features returned per type. ArcGIS Places page size is capped at 20.
+- max_results_per_type (int): Maximum places/features per type, 1..20. Only the first page is queried.
 - feature_layers (list[dict] | None): Optional ArcGIS Feature Layer configs for true spatial queries.
   Each item: {"name": "buildings", "url": "https://.../FeatureServer/0", "out_fields": ["name"]}.
+  These are not called for domestic queries; AMap does not supply complete feature layers.
+
+All input coordinates must be WGS84, never raw GCJ02/BD09. Domestic inputs are converted
+through AMap's official GPS conversion API. Returned domestic POIs include native GCJ02
+and approximate WGS84 coordinates; no survey-grade accuracy is implied.
+Provider selection uses the supplied center, or the bbox center. Split cross-border areas
+into separate queries; a center-based query does not cover every jurisdiction in a large bbox.
+query_types=[] requests address/admin context only. Default queries are bounded samples.
 
 Returns:
 - dict: Address/admin context, POI results from ArcGIS Places, optional feature-layer intersection results,
   query extent, limitations, and a saved summary JSON path.
 
 Interpretation guidance:
-- ArcGIS Places returns POIs, not complete building footprints or road networks.
+- Both providers return POI samples, not complete building footprints or road networks.
+- Domestic roads are nearby reference points from reverse geocoding, not road polylines.
 - Nearby POIs or features within the query extent are not evidence of actual damage,
   flooding, road closure, or loss of service. Describe them as nearby or potentially exposed.
 - Raster input and Feature Layer intersection queries use a bounding box, not the actual
@@ -66,6 +82,11 @@ TEMP_DIR = Path(args.temp_dir or "tmp/tmp/out")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from agent.amap_context import query_amap_context
+from agent.geo_region import context_provider
+from agent.route_geometry import coordinate
 
 GEOCODE_URL = "https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer/reverseGeocode"
 PLACES_WITHIN_EXTENT_URL = (
@@ -102,20 +123,10 @@ PLACE_SEARCH_TEXT = {
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if not path.exists():
-        return values
     try:
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except Exception:
-        return values
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip("'\"")
-    return values
+        return {key: value for key, value in dotenv_values(path).items() if value}
+    except OSError:
+        return {}
 
 
 def _arcgis_token() -> str:
@@ -169,7 +180,7 @@ def _bbox_from_raster(raster_path: str) -> list[float]:
                 densify_pts=21,
             )
         else:
-            min_lon, min_lat, max_lon, max_lat = bounds.left, bounds.bottom, bounds.right, bounds.top
+            raise ValueError("Raster has no CRS; cannot determine a reliable geographic context or provider.")
     return [float(min_lon), float(min_lat), float(max_lon), float(max_lat)]
 
 
@@ -194,7 +205,8 @@ def _bbox_from_center_radius(center: list[float], radius_m: float) -> list[float
     radius_m = max(1.0, float(radius_m))
     delta_lat = radius_m / 111_320.0
     delta_lon = radius_m / max(1.0, 111_320.0 * math.cos(math.radians(lat)))
-    return [lon - delta_lon, lat - delta_lat, lon + delta_lon, lat + delta_lat]
+    return [max(-180., lon - delta_lon), max(-90., lat - delta_lat),
+            min(180., lon + delta_lon), min(90., lat + delta_lat)]
 
 
 def _haversine_m(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -393,40 +405,82 @@ def query_geo_context(
     feature_layers: list[dict] | None = None,
     output_dir: str = "geo_context_query",
 ) -> dict:
-    token = _arcgis_token()
-    if not token:
-        raise RuntimeError(
-            "ArcGIS API key is not configured. Set ARCGIS_API_KEY or VITE_ARCGIS_API_KEY "
-            "in the environment or project-root .env file."
-        )
+    if isinstance(radius_m, bool) or not isinstance(radius_m, (float, int)) or not math.isfinite(radius_m) or not 1 <= radius_m <= 50_000:
+        raise ValueError("radius_m must be a finite number within [1, 50000].")
+    if isinstance(max_results_per_type, bool) or not isinstance(max_results_per_type, int) or not 1 <= max_results_per_type <= 20:
+        raise ValueError("max_results_per_type must be an integer within [1, 20].")
+    if feature_layers is not None and (not isinstance(feature_layers, list) or any(not isinstance(layer, dict) for layer in feature_layers)):
+        raise ValueError("feature_layers must be a list of layer configuration objects.")
+    if query_types is None:
+        query_types = list(DEFAULT_QUERY_TYPES)
+    if not isinstance(query_types, list) or any(not isinstance(name, str) or name not in PLACE_SEARCH_TEXT for name in query_types):
+        raise ValueError("query_types must contain only the documented context categories.")
+    query_types = list(dict.fromkeys(query_types))
+    if not isinstance(output_dir, str) or not output_dir.strip():
+        raise ValueError("output_dir must be a non-empty relative directory.")
+    out_dir = (TEMP_DIR / output_dir).resolve()
+    if Path(output_dir).is_absolute() or not out_dir.is_relative_to(TEMP_DIR.resolve()):
+        raise ValueError("output_dir must be relative and inside the tool temp directory.")
 
-    if raster_path and not bbox:
+    if raster_path and bbox is None:
         bbox = _bbox_from_raster(raster_path)
-    if bbox:
-        bbox = [float(value) for value in bbox]
-        if len(bbox) != 4:
+    if bbox is not None:
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
             raise ValueError("bbox must be [min_lon, min_lat, max_lon, max_lat].")
-    if center:
-        center = [float(value) for value in center]
-        if len(center) != 2:
-            raise ValueError("center must be [lon, lat].")
-    if not center and bbox:
+        west, south = coordinate(bbox[:2])
+        east, north = coordinate(bbox[2:])
+        if west >= east or south >= north:
+            raise ValueError("bbox must have increasing bounds; split antimeridian-spanning areas.")
+        bbox = [west, south, east, north]
+    selection_basis = 'explicit_center' if center is not None else 'bbox_center'
+    if center is not None:
+        center = coordinate(center)
+    if center is None and bbox is not None:
         center = _bbox_center(bbox)
-    if not bbox and center:
-        bbox = _bbox_from_center_radius(center, radius_m)
-    if not bbox or not center:
+    if center is None:
         raise ValueError("Provide raster_path, bbox, or center.")
+    if bbox is None:
+        bbox = _bbox_from_center_radius(center, radius_m)
+    if not bbox[0] <= center[0] <= bbox[2] or not bbox[1] <= center[1] <= bbox[3]:
+        raise ValueError("center must lie inside bbox; do not mix unrelated locations.")
 
-    query_types = query_types or DEFAULT_QUERY_TYPES
+    provider = context_provider(center)
     places_bbox, bbox_was_limited = _limit_bbox_for_places(bbox, center, radius_m)
-    location = _reverse_geocode(center, token)
-    places = _query_places(places_bbox, center, query_types, token, max_results_per_type)
-    feature_layer_results = _query_feature_layers(
-        bbox,
-        token,
-        feature_layers,
-        max_results_per_type,
-    )
+    limitations = [
+        "POIs are bounded samples, not complete building footprints, road networks, or evidence of damage/service availability.",
+        "An image bbox or nearby POI does not imply intersection with the actual disaster mask; verify authoritative data and actual footprints separately.",
+        "Provider selection uses the query center and approximate offline land polygons; coastal, border and small-island routing may be imperfect. Split cross-border queries.",
+        "Large extents are limited to a center-based sample no larger than 20 km by 20 km, not full-area coverage.",
+    ]
+    native = {}
+    if provider == 'amap':
+        key = os.getenv('AMAP_WEB_KEY') or _read_env_file(PROJECT_ROOT / '.env').get('AMAP_WEB_KEY', '')
+        if not key.strip():
+            raise RuntimeError("Domestic geographic context requires AMAP_WEB_KEY; ArcGIS is not used as a fallback.")
+        location, places, native = query_amap_context(
+            center, places_bbox, query_types, max_results_per_type, radius_m, key.strip(),
+        )
+        feature_layer_results = {}
+        source = 'AMap reverse geocoding and POI search'
+        limitations.extend([
+            "AMap input conversion is official WGS84-to-GCJ02; returned WGS84 POI coordinates are approximate inverses, not survey-grade.",
+            "Roads are reference points within at most 3000 m of the center, not road geometry or the entire bbox road network.",
+            "ArcGIS Feature Layers are not called for domestic queries, including layers configured in the environment.",
+        ])
+        if feature_layers:
+            limitations.append("Requested feature_layers were not executed: domestic queries use AMap, which does not provide these vector layers.")
+    else:
+        token = _arcgis_token()
+        if not token:
+            raise RuntimeError("Foreign geographic context requires ARCGIS_API_KEY; AMap is not used as a fallback.")
+        location = _reverse_geocode(center, token)
+        places = _query_places(places_bbox, center, query_types, token, max_results_per_type)
+        feature_layer_results = _query_feature_layers(bbox, token, feature_layers, max_results_per_type)
+        source = 'ArcGIS Geocoding, ArcGIS Places, optional ArcGIS Feature Layers'
+
+    operations = [location, *places.values(), *feature_layer_results.values()]
+    errors = [item['error'] for item in operations if isinstance(item, dict) and item.get('error')]
+    status = 'error' if len(errors) == len(operations) else 'partial' if errors or (provider == 'amap' and feature_layers) else 'success'
 
     place_counts = {
         key: value.get("count", 0) if isinstance(value, dict) else 0
@@ -438,7 +492,11 @@ def query_geo_context(
     }
     result = {
         "task": "geo_context_query",
-        "source": "ArcGIS Geocoding, ArcGIS Places, optional ArcGIS Feature Layers",
+        "status": status,
+        "provider": provider,
+        "source": source,
+        "provider_selection": {"basis": selection_basis, "center_wgs84": center},
+        "coordinate_systems": {"input": "WGS84", "service": "GCJ02" if provider == 'amap' else 'WGS84', **native},
         "input": {
             "raster_path": raster_path,
             "bbox": bbox,
@@ -460,18 +518,15 @@ def query_geo_context(
             "feature_counts_by_layer": feature_counts,
             "location_label": location.get("formatted_address") if isinstance(location, dict) else None,
         },
-        "limitations": [
-            "ArcGIS Places provides POIs and place records, not exhaustive building footprints or road networks.",
-            "For reliable affected-building, road, or administrative-area statistics, configure authoritative ArcGIS Feature Layers or a local spatial database.",
-            "Places service queries are limited to extents no larger than 20,000 meters by 20,000 meters; large raster extents are searched around the center with the requested radius.",
-        ],
+        "limitations": limitations,
     }
+    if errors:
+        result['errors'] = errors
 
-    out_dir = TEMP_DIR / output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = out_dir / "geo_context_summary.json"
+    summary_path = out_dir / f"geo_context_summary_{uuid4().hex}.json"
     with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+        json.dump(result, f, ensure_ascii=False, indent=2, allow_nan=False)
     result["summary_path"] = str(summary_path)
     return result
 

@@ -110,6 +110,35 @@ class UrbanFireBridgeTests(unittest.TestCase):
             with patch.dict(module.os.environ, {"URBAN_FIRE_CPU_PYTHON": ""}):
                 self.assertEqual(module._runtime_python(), str(self.python))
 
+    def test_current_python_is_default_without_runtime_configuration(self):
+        with patch.object(module.ARGS, "fire_python", None), patch.dict(
+            module.os.environ, {"URBAN_FIRE_CPU_PYTHON": ""},
+        ):
+            self.assertEqual(module._runtime_python(), module.sys.executable)
+
+    def test_explicit_python_overrides_preserve_priority(self):
+        local = self.root / "model" / "urban_fire_runtime.json"
+        local.write_text(json.dumps({"python_executable": "missing-config-python"}))
+        with patch.dict(module.os.environ, {"URBAN_FIRE_CPU_PYTHON": "missing-env-python"}):
+            self.assertEqual(module._runtime_python(), str(self.python))
+        with patch.object(module.ARGS, "fire_python", None), patch.dict(
+            module.os.environ, {"URBAN_FIRE_CPU_PYTHON": str(self.python)},
+        ):
+            self.assertEqual(module._runtime_python(), str(self.python))
+
+    def test_invalid_explicit_python_does_not_silently_use_default(self):
+        with patch.object(module.ARGS, "fire_python", str(self.root / "missing-python")):
+            with self.assertRaises(FileNotFoundError):
+                module._runtime_python()
+        local = self.root / "model" / "urban_fire_runtime.json"
+        for value in ({}, {"python_executable": ""}, {"python_executable": 123}, []):
+            local.write_text(json.dumps(value))
+            with self.subTest(config=value), patch.object(module.ARGS, "fire_python", None), patch.dict(
+                module.os.environ, {"URBAN_FIRE_CPU_PYTHON": ""},
+            ):
+                with self.assertRaises(ValueError):
+                    module._runtime_python()
+
     def test_nonzero_subprocess_is_failure(self):
         with patch.object(module.subprocess, "run", return_value=subprocess.CompletedProcess([], 2, "bad", "")):
             with self.assertRaisesRegex(RuntimeError, "exit 2"):

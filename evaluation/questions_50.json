@@ -1,0 +1,1547 @@
+{
+  "name": "urban_disaster_agent_dev50_v1",
+  "version": "1.0",
+  "date": "2026-10-24",
+  "purpose": "自建开发集：任务完成、主要工具选择、完整处理耗时；不是独立灾害模型精度或人工标注科研基准。",
+  "task_timeout_seconds": 240,
+  "tool_required_cases": 46,
+  "guard_cases": 4,
+  "grading": "先固定客观工具与产物检查，再由独立请求的同源LLM按预定评分点核验最终答案；保留原始证据，供人工复核。",
+  "cases": [
+    {
+      "id": "E001",
+      "category": "地震",
+      "question": "这是合成示例影像的模型流程测试，请实际运行检测，但不要宣称为真实灾情。请对上传的灾前、灾后影像进行建筑损毁评估，给出各损毁等级、受损比例和主要结论。注意区分掩膜像素数和建筑栋数。",
+      "fixtures": [
+        "eq_pre",
+        "eq_post"
+      ],
+      "required_tool_groups": [
+        [
+          "assess_building_damage"
+        ]
+      ],
+      "forbidden_tools": [
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成双时相损毁检测并说明主要结果",
+        "统计单位为像素，不把像素数描述为建筑栋数",
+        "结论有工具指标支持"
+      ],
+      "input_arguments": {
+        "assess_building_damage": {
+          "pre_image_path": "eq_pre",
+          "post_image_path": "eq_post"
+        }
+      },
+      "require_output": true
+    },
+    {
+      "id": "E002",
+      "category": "地震",
+      "question": "这是合成示例影像的模型流程测试，请实际运行检测，但不要宣称为真实灾情。根据这组灾前灾后影像，比较轻微损坏、严重损坏和完全摧毁的分布与占比。说明这些结果能支持哪些判断，不能确认哪些情况。",
+      "fixtures": [
+        "eq_pre",
+        "eq_post"
+      ],
+      "required_tool_groups": [
+        [
+          "assess_building_damage"
+        ]
+      ],
+      "forbidden_tools": [
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "覆盖三个受损等级的比较",
+        "不把像素比例当成真实建筑数量比例或人员伤亡",
+        "主要数值忠实于检测结果"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E003",
+      "category": "地震",
+      "question": "这是合成示例影像的模型流程测试，请实际运行检测，但不要宣称为真实灾情。仅依据这组影像评估建筑损毁的整体情况，给出需要进一步核查的重点。不要猜测拍摄地点、受影响人口或医院情况。",
+      "fixtures": [
+        "eq_pre",
+        "eq_post"
+      ],
+      "required_tool_groups": [
+        [
+          "assess_building_damage"
+        ]
+      ],
+      "forbidden_tools": [
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "有建筑损毁主体分析而非只有文件说明",
+        "不编造地点人口或设施受灾",
+        "对遥感与现场核查的边界有说明"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E004",
+      "category": "地震",
+      "question": "这是流程测试图：第一张是灾前影像，第二张是灾后影像。请按这个顺序完成损毁检测，报告模型给出的结果，不要宣称它等于真实灾情。",
+      "fixtures": [
+        "eq_first",
+        "eq_second"
+      ],
+      "required_tool_groups": [
+        [
+          "assess_building_damage"
+        ]
+      ],
+      "forbidden_tools": [
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "按明确顺序传递两张输入",
+        "返回检测主要指标和结论",
+        "不将流程测试数据解释为真实灾情"
+      ],
+      "input_arguments": {
+        "assess_building_damage": {
+          "pre_image_path": "eq_first",
+          "post_image_path": "eq_second"
+        }
+      },
+      "require_output": true
+    },
+    {
+      "id": "E005",
+      "category": "洪水",
+      "question": "上传的是 Sentinel-1 SAR，前两波段依次为 VV、VH，单位 dB。请提取洪水淹没区域，说明淹没比例、可获得的面积指标及局限。",
+      "fixtures": [
+        "flood_ghana"
+      ],
+      "required_tool_groups": [
+        [
+          "extract_flood_inundation"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成洪水提取并报告淹没比例等真实指标",
+        "不编造水深流速或真实新增淹没事实",
+        "说明至少一项遥感检测局限"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E006",
+      "category": "洪水",
+      "question": "请分析这张双波段 Sentinel-1 SAR 中的洪水淹没范围，给出量化结果。不要将二值掩膜解释为水深或水流速度。",
+      "fixtures": [
+        "flood_usa"
+      ],
+      "required_tool_groups": [
+        [
+          "extract_flood_inundation"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成洪水提取并报告淹没比例等真实指标",
+        "不编造水深流速或真实新增淹没事实",
+        "说明至少一项遥感检测局限"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E007",
+      "category": "洪水",
+      "question": "这张 SAR 影像的波段顺序是 VV、VH（dB）。请完成洪水检测，说明检测出的范围和比例，以及哪些信息还需要现场确认。",
+      "fixtures": [
+        "flood_mekong"
+      ],
+      "required_tool_groups": [
+        [
+          "extract_flood_inundation"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成洪水提取并报告淹没比例等真实指标",
+        "不编造水深流速或真实新增淹没事实",
+        "说明至少一项遥感检测局限"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E008",
+      "category": "洪水",
+      "question": "请对上传的 VV/VH 双波段 dB 影像开展洪水淹没检测，概括检测结果和可能的误判因素。不要把影像中所有水体都认定为新增洪灾。",
+      "fixtures": [
+        "flood_somalia"
+      ],
+      "required_tool_groups": [
+        [
+          "extract_flood_inundation"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成洪水提取并报告淹没比例等真实指标",
+        "不编造水深流速或真实新增淹没事实",
+        "说明至少一项遥感检测局限"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E009",
+      "category": "山火",
+      "question": "两份 NPY 按火前、火后顺序上传，均为配准的九通道 Sentinel-2 数据。请做烧毁区变化检测，说明变化范围与比例。",
+      "fixtures": [
+        "fire_0_pre",
+        "fire_0_post"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_fire_burned_area_change"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成山火变化检测",
+        "变化数值和单位与工具结果一致",
+        "不编造经济损失伤亡或未证实事件"
+      ],
+      "require_output": true,
+      "input_arguments": {
+        "detect_fire_burned_area_change": {
+          "pre_image_path": "fire_0_pre",
+          "post_image_path": "fire_0_post"
+        }
+      }
+    },
+    {
+      "id": "E010",
+      "category": "山火",
+      "question": "请根据这组火前、火后九通道数组评估山火烧毁变化，给出量化结果，并区分模型判断与需要确认的真实灾情。",
+      "fixtures": [
+        "fire_1_pre",
+        "fire_1_post"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_fire_burned_area_change"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成山火变化检测",
+        "变化数值和单位与工具结果一致",
+        "不编造经济损失伤亡或未证实事件"
+      ],
+      "require_output": true,
+      "input_arguments": {
+        "detect_fire_burned_area_change": {
+          "pre_image_path": "fire_1_pre",
+          "post_image_path": "fire_1_post"
+        }
+      }
+    },
+    {
+      "id": "E011",
+      "category": "山火",
+      "question": "请检测上传的双时相九波段数据中的烧毁区变化，说明面积或像素指标的统计口径，不要推断未提供的人口与经济损失。",
+      "fixtures": [
+        "fire_2_pre",
+        "fire_2_post"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_fire_burned_area_change"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成山火变化检测",
+        "变化数值和单位与工具结果一致",
+        "不编造经济损失伤亡或未证实事件"
+      ],
+      "require_output": true,
+      "input_arguments": {
+        "detect_fire_burned_area_change": {
+          "pre_image_path": "fire_2_pre",
+          "post_image_path": "fire_2_post"
+        }
+      }
+    },
+    {
+      "id": "E012",
+      "category": "滑坡",
+      "question": "上传的是 Landslide4Sense 的 HDF5，img 为 128×128×14，含多光谱、坡度和 DEM。请检测滑坡区域并说明比例与面积。",
+      "fixtures": [
+        "landslide_1"
+      ],
+      "required_tool_groups": [
+        [
+          "extract_landslide_area"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "正确处理十四通道 HDF5",
+        "报告工具支持的滑坡范围比例或面积",
+        "说明遥感判断及不确定性"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E013",
+      "category": "滑坡",
+      "question": "请对这个具有 img 数据集的十四通道 HDF5 做滑坡像素级检测，概括主要指标，并说明小滑坡漏检等局限。",
+      "fixtures": [
+        "landslide_2"
+      ],
+      "required_tool_groups": [
+        [
+          "extract_landslide_area"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "正确处理十四通道 HDF5",
+        "报告工具支持的滑坡范围比例或面积",
+        "说明遥感判断及不确定性"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E014",
+      "category": "滑坡",
+      "question": "这份数据符合 Landslide4Sense 输入格式。请识别疑似滑坡范围，报告量化结果，说明它不等于现场已确认的滑坡边界。",
+      "fixtures": [
+        "landslide_3"
+      ],
+      "required_tool_groups": [
+        [
+          "extract_landslide_area"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "正确处理十四通道 HDF5",
+        "报告工具支持的滑坡范围比例或面积",
+        "说明遥感判断及不确定性"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E015",
+      "category": "溢油",
+      "question": "请对这张海面 RGB 图像进行溢油区域检测，给出疑似溢油比例和可核实的量化结果，不要推断油品类型或泄漏体积。",
+      "fixtures": [
+        "oil_1"
+      ],
+      "required_tool_groups": [
+        [
+          "extract_oil_spill_area"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成海面溢油检测",
+        "数值和单位与工具输出一致",
+        "不编造油量厚度污染来源"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E016",
+      "category": "溢油",
+      "question": "分析上传图像中的疑似海面溢油范围，并解释模型检测指标和结果局限。",
+      "fixtures": [
+        "oil_2"
+      ],
+      "required_tool_groups": [
+        [
+          "extract_oil_spill_area"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成海面溢油检测",
+        "数值和单位与工具输出一致",
+        "不编造油量厚度污染来源"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E017",
+      "category": "溢油",
+      "question": "请识别海面疑似溢油区域，概括空间范围及占比。没有依据时不要推断污染来源、油层厚度或生态损失。",
+      "fixtures": [
+        "oil_3"
+      ],
+      "required_tool_groups": [
+        [
+          "extract_oil_spill_area"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成海面溢油检测",
+        "数值和单位与工具输出一致",
+        "不编造油量厚度污染来源"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E018",
+      "category": "病虫害",
+      "question": "请检测这张农作物图像中的受害植株或区域，说明检出的目标数量及局限，注意检测对象不是虫子本身。",
+      "fixtures": [
+        "pest_1"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_crop_pests"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成受害植株或区域目标检测",
+        "数量忠实于工具结果",
+        "不把目标框当虫子或确定具体虫种"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E019",
+      "category": "病虫害",
+      "question": "请分析这张作物图像的疑似病虫害受害目标，报告检出数量，不能据此判断具体虫种或虫口密度。",
+      "fixtures": [
+        "pest_2"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_crop_pests"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成受害植株或区域目标检测",
+        "数量忠实于工具结果",
+        "不把目标框当虫子或确定具体虫种"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E020",
+      "category": "病虫害",
+      "question": "对上传的作物图像做受害植株或区域识别，并说明检测结果。不要把目标框数量说成虫子的数量。",
+      "fixtures": [
+        "pest_3"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_crop_pests"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成受害植株或区域目标检测",
+        "数量忠实于工具结果",
+        "不把目标框当虫子或确定具体虫种"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E021",
+      "category": "藻华",
+      "question": "这张 Sentinel-2 GeoTIFF 七波段依次为 B2、B3、B4、B5、B8、B11、B12。请检测候选藻华，给出面积及占检测水域的比例，并解释指标局限。",
+      "fixtures": [
+        "algal_09"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_algal_bloom"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成 NDCI 候选检测",
+        "area_ratio 指检测水域内占比而非整幅影像",
+        "不把 NDCI 当标定浓度、不推断种属毒性"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E022",
+      "category": "藻华",
+      "question": "请根据这张含 B5 红边的七波段影像识别候选藻华或高叶绿素区域。说明 NDCI 的相对含义，不要推断藻类种属或毒性。",
+      "fixtures": [
+        "algal_05"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_algal_bloom"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成 NDCI 候选检测",
+        "area_ratio 指检测水域内占比而非整幅影像",
+        "不把 NDCI 当标定浓度、不推断种属毒性"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E023",
+      "category": "藻华",
+      "question": "对这张七波段 Sentinel-2 数据进行藻华候选检测。请如实报告结果，即使候选很少，也不要为了给结论而放大风险。波段顺序为 B2、B3、B4、B5、B8、B11、B12。",
+      "fixtures": [
+        "algal_06"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_algal_bloom"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成 NDCI 候选检测",
+        "area_ratio 指检测水域内占比而非整幅影像",
+        "不把 NDCI 当标定浓度、不推断种属毒性"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E024",
+      "category": "城市火灾",
+      "question": "请检查这张城市场景照片中是否有疑似火焰或烟雾，报告检出情况与置信度，不能直接确认真实火警。",
+      "fixtures": [
+        "urban_1"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_urban_fire_smoke"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "使用普通图像烟火检测",
+        "检测目标和置信度来自工具返回",
+        "不声称官方火警或实际事故已确认"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E025",
+      "category": "城市火灾",
+      "question": "请识别图像中的可见火焰或烟雾目标，说明检测结果和不确定性，不要把目标检测结果当作官方火灾确认。",
+      "fixtures": [
+        "urban_2"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_urban_fire_smoke"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "使用普通图像烟火检测",
+        "检测目标和置信度来自工具返回",
+        "不声称官方火警或实际事故已确认"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E026",
+      "category": "城市火灾",
+      "question": "对这张普通 RGB 照片做城市火灾烟火识别，说明发现了什么及还需要确认什么。不要调用山火遥感变化检测来处理它。",
+      "fixtures": [
+        "urban_3"
+      ],
+      "required_tool_groups": [
+        [
+          "detect_urban_fire_smoke"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "使用普通图像烟火检测",
+        "检测目标和置信度来自工具返回",
+        "不声称官方火警或实际事故已确认"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E027",
+      "category": "交通事故",
+      "question": "这是遵循CCD格式的合成特征，仅用于流程测试，不是真实行车记录。上传的是 CCD 来源格式的预计算行车视频特征 NPZ，data 为 (50,20,4096)，det 为 (50,19,4)，fps 为10。请分析风险分数、阈值越界和不确定性，说明这些分数不能直接确认事故。",
+      "fixtures": [
+        "traffic_features"
+      ],
+      "required_tool_groups": [
+        [
+          "anticipate_traffic_accident"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke"
+      ],
+      "criteria": [
+        "完成预计算特征风险分析",
+        "报告分数或越界情况及不确定性",
+        "保留 legacy_compatible 未经验证局限，不把分数当事故概率或事故确认"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E028",
+      "category": "交通事故",
+      "question": "这是遵循CCD格式的合成特征，仅用于流程测试，不是真实行车记录。这份 NPZ 是50帧、10 FPS 的 CCD 行车特征。请以0.8为风险分数阈值分析是否越界，解释结果；没有越界不代表一定没有事故。",
+      "fixtures": [
+        "traffic_features"
+      ],
+      "required_tool_groups": [
+        [
+          "anticipate_traffic_accident"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke"
+      ],
+      "criteria": [
+        "使用指定阈值0.8",
+        "越界结论与工具结果一致",
+        "不把低分认定为无事故"
+      ],
+      "require_output": true,
+      "argument_values": {
+        "anticipate_traffic_accident": {
+          "threshold": 0.8
+        }
+      }
+    },
+    {
+      "id": "E029",
+      "category": "天气",
+      "question": "请查询深圳市中心（WGS84 经度114.06、纬度22.54）未来三天的天气，重点比较降雨和风力，并说明对室外应急作业的潜在影响。",
+      "fixtures": [],
+      "required_tool_groups": [
+        [
+          "query_weather"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "使用所给地点的未来三天预报",
+        "比较降雨与风力且数据来自工具",
+        "不把预报称为官方预警"
+      ],
+      "coordinates": {
+        "query_weather": [
+          114.06,
+          22.54
+        ]
+      }
+    },
+    {
+      "id": "E030",
+      "category": "天气",
+      "question": "请查询纽约曼哈顿（WGS84 经度-73.98、纬度40.75）接下来三天的天气，指出哪天降雨或风力更值得关注，注明日期和来源。",
+      "fixtures": [],
+      "required_tool_groups": [
+        [
+          "query_weather"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "正确使用国外坐标并提供三天预报",
+        "比较有工具依据并注明日期来源",
+        "不混用历史天气或其他城市"
+      ],
+      "coordinates": {
+        "query_weather": [
+          -73.98,
+          40.75
+        ]
+      }
+    },
+    {
+      "id": "E031",
+      "category": "天气",
+      "question": "请查询上海市中心（WGS84 经度121.47、纬度31.23）未来三天最高温、最低温和降雨情况，指出临时安置场所保障需要关注的天气因素。",
+      "fixtures": [],
+      "required_tool_groups": [
+        [
+          "query_weather"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "查询对应坐标未来三天",
+        "报告温度和降雨量且单位正确",
+        "建议与实际预报对应"
+      ],
+      "coordinates": {
+        "query_weather": [
+          121.47,
+          31.23
+        ]
+      }
+    },
+    {
+      "id": "E032",
+      "category": "地理上下文",
+      "question": "请查询深圳（WGS84 经度114.06、纬度22.54）周边医院、学校和道路参考信息，每类最多两项。说明这些信息为什么不能证明设施已经受灾。",
+      "fixtures": [],
+      "required_tool_groups": [
+        [
+          "query_geo_context"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "国内使用高德服务",
+        "结果限定所给位置且医院学校道路有实际来源",
+        "不将周边查询认定为受灾证据"
+      ],
+      "provider": "amap",
+      "require_output": true
+    },
+    {
+      "id": "E033",
+      "category": "地理上下文",
+      "question": "请查询北京（WGS84 经度116.40、纬度39.90）附近的公园、医院和居住区，每类最多两项。只报告能查到的信息，不要猜测接纳容量或开放状态。",
+      "fixtures": [],
+      "required_tool_groups": [
+        [
+          "query_geo_context"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "国内使用高德服务",
+        "仅报告查询结果",
+        "不编造容量开放状态"
+      ],
+      "provider": "amap",
+      "require_output": true
+    },
+    {
+      "id": "E034",
+      "category": "地理上下文",
+      "question": "请查询纽约曼哈顿（WGS84 经度-73.98、纬度40.75）周边的医院和学校，每类最多两项，并说明位置邻近不等于受到灾害影响。",
+      "fixtures": [],
+      "required_tool_groups": [
+        [
+          "query_geo_context"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "国外使用 ArcGIS 服务",
+        "查询位置与给定坐标相符",
+        "不将邻近等同受灾"
+      ],
+      "provider": "arcgis",
+      "require_output": true
+    },
+    {
+      "id": "E035",
+      "category": "路径规划",
+      "question": "请以深圳（WGS84 经度114.06、纬度22.54）为出发点，寻找一个医院候选并给出驾车路线方案。说明地图路线没有验证灾后实际通行和医院接诊能力。",
+      "fixtures": [],
+      "required_tool_groups": [
+        [
+          "plan_emergency_routes"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "使用所给出发点查找医院与路线",
+        "路线距离或时间有工具依据",
+        "明确未验证灾后通行与医院接诊能力"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E036",
+      "category": "路径规划",
+      "question": "从深圳（WGS84 经度113.93、纬度22.54）出发，查询可用的消防站候选路线，最多给两个方案。不要把地图中的路线描述为已验证安全的救援通道。",
+      "fixtures": [],
+      "required_tool_groups": [
+        [
+          "plan_emergency_routes"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "查询消防站候选而不是医院",
+        "路线数据来自工具",
+        "不保证实际安全通行"
+      ],
+      "require_output": true
+    },
+    {
+      "id": "E037",
+      "category": "网页搜索",
+      "question": "请联网检索2025年西藏定日地震的官方或可靠公开资料，概括震级、发生时间和影响，给出可核查的来源链接，并区分不同统计时间。",
+      "fixtures": [],
+      "required_tool_groups": [
+        [
+          "search_web"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "实际调用网页检索",
+        "关键事实有查询返回支持的来源链接",
+        "不把不同时间的统计混为确定最终数字"
+      ]
+    },
+    {
+      "id": "E038",
+      "category": "遥感指数",
+      "question": "两张单波段影像依次为近红外和红光。请生成 NDVI 结果，并报告平均值。",
+      "fixtures": [
+        "nir",
+        "red"
+      ],
+      "required_tool_groups": [
+        [
+          "calculate_batch_ndvi"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "生成 NDVI 栅格",
+        "说明平均值约0.5且含义正确"
+      ],
+      "require_output": true,
+      "raster_check": {
+        "mean": 0.5,
+        "tolerance": 0.00001
+      }
+    },
+    {
+      "id": "E039",
+      "category": "遥感指数",
+      "question": "上传的单波段文件依次为短波红外和近红外。请计算 NDBI 并生成结果，说明本示例的平均值。",
+      "fixtures": [
+        "swir",
+        "nir"
+      ],
+      "required_tool_groups": [
+        [
+          "calculate_batch_ndbi"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "生成 NDBI 栅格",
+        "平均值约-0.3333，不把负值当作确定的城市建筑面积"
+      ],
+      "require_output": true,
+      "raster_check": {
+        "mean": -0.3333333333333333,
+        "tolerance": 0.00001
+      }
+    },
+    {
+      "id": "E040",
+      "category": "遥感指数",
+      "question": "两张单波段影像依次为近红外和短波红外，请生成 NBR 指数结果并报告平均值。注意单时相 NBR 不能直接认定火灾变化。",
+      "fixtures": [
+        "nir",
+        "swir"
+      ],
+      "required_tool_groups": [
+        [
+          "calculate_batch_nbr"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "生成 NBR 栅格",
+        "平均值约0.3333",
+        "不将单时相指数当火灾变化结论"
+      ],
+      "require_output": true,
+      "raster_check": {
+        "mean": 0.3333333333333333,
+        "tolerance": 0.00001
+      }
+    },
+    {
+      "id": "E041",
+      "category": "统计分析",
+      "question": "请计算上传的单波段数值影像中，像素值严格大于0.5的像素比例，说明统计口径。",
+      "fixtures": [
+        "gradient"
+      ],
+      "required_tool_groups": [
+        [
+          "calculate_threshold_ratio"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "实际读取影像计算阈值比例",
+        "比例为50%或0.5且严格大于阈值"
+      ],
+      "numeric_answer": {
+        "value": 0.5,
+        "percent": 50
+      }
+    },
+    {
+      "id": "E042",
+      "category": "趋势分析",
+      "question": "连续五年的年均积水比例依次为0.2、0.3、0.4、0.5、0.6。请使用已有分析能力计算变化趋势和每年的变化量，并说明比例变化与百分点的区别。",
+      "fixtures": [],
+      "required_tool_groups": [
+        [
+          "compute_linear_trend",
+          "sens_slope"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "使用趋势分析工具",
+        "每年增加0.1，即10个百分点",
+        "不把0.1直接表述为同比10%"
+      ]
+    },
+    {
+      "id": "E043",
+      "category": "影像处理",
+      "question": "请把上传的单波段影像按0.5阈值做分割，严格大于0.5记为前景，生成二值栅格，说明前景含义不等于真实灾害。",
+      "fixtures": [
+        "gradient"
+      ],
+      "required_tool_groups": [
+        [
+          "threshold_segmentation"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "生成正确阈值二值栅格",
+        "前景占一半",
+        "不将数值阈值图当真实灾害检测"
+      ],
+      "require_output": true,
+      "raster_check": {
+        "unique": [
+          0,
+          255
+        ],
+        "mean": 127.5,
+        "tolerance": 0.00001
+      }
+    },
+    {
+      "id": "E044",
+      "category": "影像差分",
+      "question": "两张单波段积水指标图按时刻A、时刻B上传。请计算 B减A 的逐像素差分，生成结果并报告均值，注意这不是实际水深变化。",
+      "fixtures": [
+        "time_a",
+        "time_b"
+      ],
+      "required_tool_groups": [
+        [
+          "calculate_tif_difference"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "按B减A生成差分",
+        "均值为3",
+        "不认定为实际水深"
+      ],
+      "require_output": true,
+      "raster_check": {
+        "mean": 3,
+        "tolerance": 0.00001
+      }
+    },
+    {
+      "id": "E045",
+      "category": "多工具城市评估",
+      "question": "这是深圳应急演练的配准灾前灾后影像，区域参考中心为WGS84经度114.06、纬度22.54。请先评估建筑损毁，再结合周边医院、学校和未来三天天气，分析对公共服务与现场核查的潜在影响。请区分模型结果、周边参考信息与已确认灾情。",
+      "fixtures": [
+        "eq_pre",
+        "eq_post"
+      ],
+      "required_tool_groups": [
+        [
+          "assess_building_damage"
+        ],
+        [
+          "query_geo_context"
+        ],
+        [
+          "query_weather"
+        ]
+      ],
+      "forbidden_tools": [
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成地震检测及地理、天气信息获取",
+        "将三类证据关联分析但不把周边设施认定受灾",
+        "不混淆演练结果和已确认灾情"
+      ],
+      "require_output": true,
+      "provider": "amap"
+    },
+    {
+      "id": "E046",
+      "category": "多工具城市评估",
+      "question": "请检测上传的VV/VH双波段dB影像的洪水范围，再根据文件中的地理位置查询附近医院和学校、未来三天天气，分析公共服务核查与应急作业的潜在困难。必须区分影像范围、实际淹没范围与设施受灾证据。",
+      "fixtures": [
+        "flood_usa"
+      ],
+      "required_tool_groups": [
+        [
+          "extract_flood_inundation"
+        ],
+        [
+          "query_geo_context"
+        ],
+        [
+          "query_weather"
+        ]
+      ],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "完成洪水检测并使用影像位置查询地理和天气",
+        "不把影像边界内设施等同淹没或受灾",
+        "以实际天气和查询结果支持建议"
+      ],
+      "require_output": true,
+      "provider": "arcgis"
+    },
+    {
+      "id": "E047",
+      "category": "缺少输入",
+      "question": "请帮我评估地震后的建筑损毁程度，给出受损比例。",
+      "fixtures": [],
+      "required_tool_groups": [],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "明确缺少灾前灾后影像等必要输入",
+        "请求补充数据，不编造受损比例",
+        "不擅自找服务器样本分析"
+      ],
+      "guard": true
+    },
+    {
+      "id": "E048",
+      "category": "缺少位置",
+      "question": "请评估这片淹没区对居民和医院的影响，再看看未来三天天气会不会增加处置困难。",
+      "fixtures": [],
+      "required_tool_groups": [],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident",
+        "query_geo_context",
+        "query_weather",
+        "plan_emergency_routes"
+      ],
+      "criteria": [
+        "明确缺少淹没影像和地点",
+        "请求补充位置及数据",
+        "不猜测城市或自行读取服务器样本"
+      ],
+      "guard": true
+    },
+    {
+      "id": "E049",
+      "category": "输入不兼容",
+      "question": "我只有上传的普通三通道 PNG，请使用滑坡模型检测滑坡面积。没有其他多光谱、坡度、DEM或HDF5文件。",
+      "fixtures": [
+        "plain_rgb"
+      ],
+      "required_tool_groups": [],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "说明当前滑坡模型需要128×128×14且含img数据集的HDF5",
+        "不能把普通RGB伪造成十四通道",
+        "请求符合格式的数据而不是宣称已检测"
+      ],
+      "guard": true
+    },
+    {
+      "id": "E050",
+      "category": "输入不兼容",
+      "question": "这张 TIFF 只有五个波段，依次为 B2、B3、B4、B8、B11，没有B5。请用标准 NDCI 检测藻华。",
+      "fixtures": [
+        "five_band"
+      ],
+      "required_tool_groups": [],
+      "forbidden_tools": [
+        "assess_building_damage",
+        "extract_flood_inundation",
+        "detect_fire_burned_area_change",
+        "extract_landslide_area",
+        "extract_oil_spill_area",
+        "detect_crop_pests",
+        "detect_algal_bloom",
+        "detect_urban_fire_smoke",
+        "anticipate_traffic_accident"
+      ],
+      "criteria": [
+        "指出缺少B5红边不能运行标准NDCI",
+        "不拿其他波段替代B5或伪造七波段",
+        "请求补充数据，不编造藻华面积"
+      ],
+      "guard": true
+    }
+  ]
+}

@@ -17,6 +17,16 @@ spec.loader.exec_module(route)
 ORIGIN = [116.4, 39.9]
 
 
+class RegistrationTests(unittest.TestCase):
+    def test_qwen_registers_existing_route_server_without_credentials(self):
+        config = json.loads((ROOT / 'agent/config_qwen3.json').read_text())
+        server = config['mcpServers']['RoutePlanning']
+        self.assertEqual(server['command'], 'python')
+        self.assertEqual(server['args'], ['tools/RoutePlanning.py', '--temp_dir', 'tmp/tmp/out'])
+        self.assertNotIn('env', server)
+        self.assertIn('WebSearch', config['mcpServers'])
+
+
 def poi(index):
     return {'id': f'hospital-{index}', 'name': f'综合医院{index}', 'location': f'{116.4+index*.01:.6f},39.900000',
             'distance': str(index*1000), 'address': '测试地址', 'tel': '010-12345678', 'type': '医疗保健服务;综合医院'}
